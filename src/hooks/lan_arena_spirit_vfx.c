@@ -8,6 +8,7 @@
 
 #include "cleanroom/engine.h"
 #include "network/lan_arena_protocol.h"
+#include "hooks/story_aimed_flash.h"
 
 static SudekiMpCleanroomActor seat_host_actor(void) {
     uint8_t host_type = 0u, client_type = 0u;
@@ -1304,6 +1305,9 @@ BOOL SudekiMpLanArenaSpiritVfxVisualMatrix(
         matrix[12u+index] = visual->position[index];
     }
     matrix[15] = 1.0f;
+    /* Weapon flashes placed without locator follow: the native aimed rows. */
+    if (SudekiMpAimedFlashKind(visual->owner_actor_type, visual->kind, visual->skill_sequence))
+        SudekiMpAimedFlashRebuild(matrix);
     return TRUE;
 }
 

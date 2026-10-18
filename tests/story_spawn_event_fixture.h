@@ -1,23 +1,24 @@
 /* Exact-image creation with inert allocation/resource endpoints. The retail
  * creator, constructor and weak ownership execute; no gameplay/IO is run. */
 static uint8_t event_group[0x1b4],event_points[2][0x80],event_entries[2][0x50];
-static uint8_t event_jobs[4][0x28],event_actors[4][0x200],event_resource[0x14];
+static uint8_t event_jobs[8][0x28],event_actors[8][0x200],event_resource[0x14];
 static uint8_t event_world[0x60],event_desc[0x38],event_zone[0x11c],event_zone_refs[0x24];
-static void *event_registry[5];
+static void *event_registry[10];
+static BOOL event_ally; /* E2: the stand-in creates an AllyEntity */
 static uint32_t event_name[2];
 static unsigned event_allocations,event_resource_calls,event_retire_calls,event_host_ticks;
 static void * __cdecl event_allocate(unsigned size) {
-    assert(size==0x28 && event_allocations<4);return event_jobs[event_allocations++];
+    assert(size==0x28 && event_allocations<8);return event_jobs[event_allocations++];
 }
 static void * __attribute__((noinline,used)) event_resource_request(void *raw,unsigned sync,uint32_t *name) {
-    assert(sync==1 && event_resource_calls<4);
+    assert(sync==1 && event_resource_calls<8);
     /* 411730 returns ESI's 20-byte resource handle: ResourceName at +4,
      * including the +0xC record released by 476377, actor reference at +0x10.
      * An uninitialized output here makes the native fixture stack-dependent. */
     name[0]=0;name[1]=0xfc0;name[2]=0x7ffff;name[3]=0;
     unsigned i=event_resource_calls++;assert(raw==event_jobs[i]);
-    uint8_t *a=event_actors[i];*(void **)a=image_base+0x2d5fa0;
-    *(void **)(a+0x2c)=image_base+0x2d5fe4;*(uint32_t *)(a+0x34)=93;
+    uint8_t *a=event_actors[i];*(void **)a=image_base+(event_ally?0x2d55d4:0x2d5fa0);
+    *(void **)(a+0x2c)=image_base+(event_ally?0x2d5618:0x2d5fe4);*(uint32_t *)(a+0x34)=93;
     *(uint32_t *)(a+0x140)=3;*(void **)((uint8_t *)raw+4)=a+0x2c;
     *(void **)(event_resource+0x10)=a+0x2c;
     event_registry[i+1]=a;*(unsigned *)(registry+0x34)=i+2;
@@ -163,6 +164,85 @@ static void spawn_event_fixture(void) {
     memcpy(image_base+0x18a80,effect_save,5);client_role=FALSE;
     puts("Host-emitted death receipt, wrong-asset refusal, retransmission and despawn deduplication PASS");
     assert(SudekiMpLanStorySpawnEventsCapture(&captured) && !captured.spawn_count && captured.spawns_valid);
+    /* E2: allies (AllyEntity, entry type 0x02: the castle-road gate guards)
+     * take the same path; a lease binds only the class its entry creates. */
+    puts("fixture: ally create");
+    image_base[0x4bc0]=0xc3;assert(FlushInstructionCache(GetCurrentProcess(),image_base,0x45f000));
+    event_ally=TRUE;*(uint32_t *)(event_entries[0]+0xc)=0x02;
+    client_role=TRUE;
+    SudekiMpStoryEffectState ha={.epoch=1,.current="fixture",.spawns_valid=1,.spawn_count=1};
+    ha.spawns[0]=(SudekiMpStorySpawnEvent){.group="ambush",.serial=501,.group_id=41,.resource=93,
+        .point=0,.entry=0,.passes=1};
+    unsigned base_alloc=event_allocations;
+    assert(SudekiMpLanStorySpawnEventsFollow(&ha) && event_allocations==base_alloc+1 && !spawn_event_fault);
+    uint8_t *ally=event_actors[base_alloc];
+    assert(*(void **)ally==image_base+0x2d55d4 && SudekiMpLanStorySpawnIdentity(ally,&id) && id==501);
+    *(void **)ally=image_base+0x2d5fa0;assert(!SudekiMpLanStorySpawnIdentity(ally,&id)); /* class must match */
+    *(void **)ally=image_base+0x2d55d4;assert(SudekiMpLanStorySpawnIdentity(ally,&id) && id==501);
+    event_finish_job(base_alloc);
+    unsigned retired=event_retire_calls;
+    ha.spawn_count=0;memset(ha.spawns,0,sizeof(ha.spawns));
+    assert(SudekiMpLanStorySpawnEventsFollow(&ha) && event_retire_calls==retired+1);
+    assert(!SudekiMpLanStorySpawnIdentity(ally,&id));
+    /* Host: the real constructor path publishes an ally like a monster. */
+    client_role=FALSE;
+    *(unsigned *)(g+0x18c)=0;*(unsigned *)(g+0x190)=0;*(unsigned *)(g+0x17c)=1;
+    spawn_event_create_native(g);assert(event_allocations==base_alloc+2 && !spawn_event_fault);
+    assert(SudekiMpLanStorySpawnEventsCapture(&captured) && captured.spawn_count==1);
+    assert(SudekiMpLanStorySpawnIdentity(event_actors[base_alloc+1],&id) && id==captured.spawns[0].serial);
+    uint8_t *host_ally=event_actors[base_alloc+1];uint32_t host_ally_serial=id;
+    event_finish_job(base_alloc+1);
+    /* An ally entry whose job yields a monster binds nothing and faults
+     * nothing; the lease clears once the job is over. */
+    event_ally=FALSE;
+    *(unsigned *)(g+0x18c)=1;*(unsigned *)(g+0x190)=0;*(unsigned *)(g+0x17c)=1;
+    spawn_event_create_native(g);assert(event_allocations==base_alloc+3 && !spawn_event_fault);
+    assert(!SudekiMpLanStorySpawnIdentity(event_actors[base_alloc+2],&id));
+    event_finish_job(base_alloc+2);
+    assert(SudekiMpLanStorySpawnEventsCapture(&captured) && captured.spawn_count==1 && !spawn_event_fault);
+    event_ally=TRUE;base_alloc+=1;
+    /* Any other entry type (a gate, 0x0F) keeps its own owner: no lease. */
+    *(uint32_t *)(event_entries[1]+0xc)=0x0f;
+    *(unsigned *)(g+0x18c)=1;*(unsigned *)(g+0x190)=1;*(unsigned *)(g+0x17c)=1;
+    spawn_event_create_native(g);assert(event_allocations==base_alloc+3 && !spawn_event_fault);
+    assert(!SudekiMpLanStorySpawnIdentity(event_actors[base_alloc+2],&id));
+    event_finish_job(base_alloc+2);
+    assert(SudekiMpLanStorySpawnEventsCapture(&captured) && captured.spawn_count==1);
+    /* Departure: a dead actor leaves the native registry while its native
+     * delete is still pending (the weak stays bound). That is a despawn now:
+     * recorded once, out of the roster, and the capture keeps working. A
+     * live actor that goes missing (a registry rebuild) is unknown. */
+    unsigned slot=0;for(;slot<10 && event_registry[slot]!=host_ally;++slot) {}
+    assert(slot<10);
+    uint32_t before=despawn_serial;
+    event_registry[slot]=NULL;
+    for(unsigned k=0;k<3;++k) assert(!SudekiMpLanStorySpawnEventsCapture(&captured)); /* alive: unknown, as before */
+    assert(despawn_serial==before && !spawn_event_fault);
+    event_registry[slot]=host_ally;
+    static uint8_t ally_arb[0x64];*(void **)ally_arb=image_base+0x2cc9ac;*(void **)(ally_arb+0x10)=host_ally;
+    *(uint32_t *)(ally_arb+0x50)=0x4000;*(void **)(host_ally+0x90)=ally_arb;
+    assert(SudekiMpLanStorySpawnEventsCapture(&captured) && captured.spawn_count==1); /* proven dead, still present */
+    event_registry[slot]=NULL;
+    assert(!SudekiMpLanStorySpawnEventsCapture(&captured) && despawn_serial==before); /* one tick is not enough */
+    assert(SudekiMpLanStorySpawnEventsCapture(&captured) && captured.spawn_count==0 && !spawn_event_fault);
+    assert(despawn_serial==before+1 && despawned[SUDEKIMP_STORY_DESPAWN_MAX-1].identity==host_ally_serial);
+    assert(SudekiMpLanStorySpawnEventsCapture(&captured) && despawn_serial==before+1); /* once */
+    { unsigned saved_count=*(unsigned *)(registry+0x34);*(unsigned *)(registry+0x34)=0;
+      assert(!spawn_event_registry_lacks(host_ally)); /* an empty list proves nothing */
+      *(unsigned *)(registry+0x34)=saved_count; }
+    event_registry[slot]=host_ally; /* a published despawn returns: fail closed */
+    assert(!SudekiMpLanStorySpawnEventsCapture(&captured) && spawn_event_fault);
+    spawn_event_fault=FALSE;event_registry[slot]=NULL;
+    void *saved_registry=*(void **)(image_base+RVA_REGISTRY);
+    *(void **)(image_base+RVA_REGISTRY)=NULL;assert(!spawn_event_registry_lacks(host_ally)); /* unknown */
+    *(void **)(image_base+RVA_REGISTRY)=saved_registry;assert(spawn_event_registry_lacks(host_ally));
+    event_destroy_weak(host_ally); /* the deferred native delete */
+    assert(SudekiMpLanStorySpawnEventsCapture(&captured) && despawn_serial==before+1 && !spawn_event_fault);
+    for(unsigned i=0;i<SPAWN_EVENT_SLOTS;++i) assert(!spawn_events[i].used || spawn_events[i].state.serial!=host_ally_serial);
+    puts("Departure: out of the registry is a despawn once, the roster keeps publishing; an unreadable registry is unknown PASS");
+    event_ally=FALSE;for(unsigned i=0;i<2;++i) *(uint32_t *)(event_entries[i]+0xc)=0x19;
+    image_base[0x4bc0]=assign;
+    puts("Ally spawn events: client create, exact-class binding, retire, host publish; other types ignored PASS");
     assert(spawn_events_uninstall() && spawn_jobs_uninstall());
     memcpy(image_base+0x2484fa,save_alloc,5);memcpy(image_base+0x11730,save_resource,5);
     memcpy(image_base+rvas[DESPAWN],save_remove,5);image_base[0x4bc0]=assign;

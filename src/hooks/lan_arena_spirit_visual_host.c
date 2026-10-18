@@ -1,6 +1,7 @@
 #include "hooks/lan_arena_spirit_visual_host.h"
 #include "hooks/call_hook.h"
 #include "hooks/lan_party_projectile_lifetime.h"
+#include "hooks/story_aimed_flash.h"
 #include "cleanroom/engine.h"
 #include "engine/log.h"
 #include <math.h>
@@ -190,6 +191,7 @@ static volatile LONG unexpected_thread;
 static BOOL pinned;
 static BOOL session_armed;
 static const char *sample_reason;
+static uint8_t sample_kind;
 static const char *last_capture_reason;
 static int last_capture_count = -1;
 static uint32_t diagnostic_ids[DIAGNOSTIC_CAPACITY];
@@ -771,6 +773,8 @@ static BOOL native_sample(void *context, const SudekiMpSpiritVisualWeakNode *nod
     const float *matrix;
     typedef const float *(__attribute__((thiscall)) *WorldMatrix)(void *);
     (void)context;
+    BOOL root = FALSE;
+    sample_kind = kind;
     sample_reason = "native_effect_identity";
     if (GetCurrentThreadId() != game_thread || !weak_links_valid(node) ||
         !exact_effect(e) || kind == 0u || kind >= sizeof(resource_ids)/sizeof(resource_ids[0]))
@@ -831,7 +835,7 @@ static BOOL native_sample(void *context, const SudekiMpSpiritVisualWeakNode *nod
                 !pointer_at(p, 0x8cu, &tree) ||
                 !memory_access(tree, 0x110u, TRUE) ||
                 !pointer_at(p, 0x94u, &parent)) return FALSE;
-            if (parent == NULL) break;
+            if (parent == NULL) { root = depth == 0u; break; }
             if ((uintptr_t)parent < 4u) return FALSE;
             p = (uint8_t *)parent - 4u;
             if (p == position) return FALSE;
@@ -840,8 +844,18 @@ static BOOL native_sample(void *context, const SudekiMpSpiritVisualWeakNode *nod
     }
     sample_reason = "native_world_pose";
     matrix = ((WorldMatrix)((uint8_t *)image + RVA_WORLD_MATRIX))(position);
-    if (!memory_access(matrix, 16u * sizeof(float), FALSE) ||
-        !SudekiMpSpiritVisualDecomposeMatrix(matrix, value)) return FALSE;
+    if (!memory_access(matrix, 16u * sizeof(float), FALSE)) return FALSE;
+    if (!SudekiMpSpiritVisualDecomposeMatrix(matrix, value)) {
+        /* A weapon flash placed without locator follow has the native aimed
+         * (sheared) basis whenever the aim is pitched: publish its exact
+         * orthonormal frame and row lengths; the client rebuilds the native
+         * rows. Any other shear still fails. */
+        float frame[16];
+        sample_reason = "native_world_pose_shear";
+        if (!root || !SudekiMpAimedFlashKind(value->owner_actor_type, kind, value->skill_sequence) ||
+            !SudekiMpAimedFlashOrthonormalize(matrix, frame) ||
+            !SudekiMpSpiritVisualDecomposeMatrix(frame, value)) return FALSE;
+    }
     sample_reason = "native_animation_phase";
     if (!native_phase(renderer, value) || node->entity != e || !exact_effect(e))
         return FALSE;
@@ -1724,7 +1738,21 @@ BOOL SudekiMpLanPartySpiritVisualHostCapture(uint64_t session,BOOL idle_baseline
         if(!idle_baseline) return FALSE;
         registry.session=session; session_armed=TRUE;
     }
-    return SudekiMpSpiritVisualHostRegistryCaptureStory(&registry,session,output,native_api());
+    sample_reason=NULL;
+    BOOL captured=SudekiMpSpiritVisualHostRegistryCaptureStory(&registry,session,output,native_api());
+    {   /* One failing entry fails the complete roster: name it, once per
+         * change (an effect the wire cannot represent no longer freezes all
+         * story VFX silently). */
+        static const char *last_reason; static uint8_t last_kind; static unsigned logs;
+        const char *reason=captured?NULL:sample_reason;
+        if((reason!=last_reason || (reason && sample_kind!=last_kind)) && logs<64u) {
+            ++logs;
+            SudekiMpLogFormat("story_vfx event=host_capture captured=%u reason=%s kind=%u\r\n",
+                captured,reason?reason:(captured?"ok":"registry"),reason?sample_kind:0u);
+        }
+        last_reason=reason; last_kind=reason?sample_kind:0u;
+    }
+    return captured;
 }
 
 BOOL SudekiMpLanArenaSpiritVisualHostCapture(

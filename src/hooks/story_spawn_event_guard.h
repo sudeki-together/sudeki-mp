@@ -8,6 +8,9 @@ static const SpawnEventContract spawn_event_contracts[]={
     {"SpawnEventWeakDestroy",0x4d30u,83u,0x308b7b8fu,{9u,0u}},
     {"SpawnEventMonsterDestroy",0x1464c0u,31u,0xab4b90ecu,{0u}},
     {"SpawnEventMonsterBaseDestroy",0x1467dcu,14u,0xc3177d48u,{0u}},
+    /* E2: AllyEntity (the gate guards) leaves through the same DespawnEntity. */
+    {"SpawnEventAllyDestroy",0x13f300u,31u,0x95736a36u,{0u}},
+    {"SpawnEventAllyBaseDestroy",0x13f610u,14u,0x18c1b8dfu,{0u}},
     {"SpawnEventGroupDestroy",0x72f90u,30u,0xe15cbedeu,{0u}},
     {"SpawnEventGroupBaseDestroy",0x73039u,8u,0xc9f5aa95u,{0u}},
     {"SpawnEventEntityBaseDestroy",0x13db47u,10u,0x23e5298fu,{0u}},
@@ -30,5 +33,6 @@ static BOOL spawn_event_code(uint8_t *b) {
         }
         if(h!=c->hash) return FALSE;
     }
-    return *(void **)(b+0x2d5fa0u)==b+0x1464c0u && *(void **)(b+0x2c9e20u)==b+0x72f90u;
+    return *(void **)(b+0x2d5fa0u)==b+0x1464c0u && *(void **)(b+0x2d55d4u)==b+0x13f300u &&
+        *(void **)(b+0x2c9e20u)==b+0x72f90u;
 }

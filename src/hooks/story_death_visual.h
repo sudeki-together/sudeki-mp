@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <math.h>
+#include "hooks/story_spawned_actor.h"
 
 /* Visual-only SFX creation. No CCombat/death/loot entry is called. A portable
  * death style resolves only to the matched resident monster's authored action
@@ -28,7 +29,7 @@ static inline BOOL SudekiMpStoryDeathVisualCode(uint8_t *b,SudekiMpStoryVisualMe
 static inline BOOL SudekiMpStoryDeathVisualPrepare(uint8_t *b,uint8_t *e,unsigned style,
     SudekiMpStoryDeathVisual *out,SudekiMpStoryVisualMemory m) {
     if(!out || style<1u || style>4u || !SudekiMpStoryDeathVisualCode(b,m) ||
-        !m(e,0xb4u,FALSE) || *(void **)e!=b+0x2d5fa0u ||
+        !m(e,0xb4u,FALSE) || !SudekiMpStorySpawnedClass(b,*(void **)e) ||
         !m(b+0x408d48u,4u,FALSE)) return FALSE;
     uint8_t *manager=*(uint8_t **)(b+0x408d48u),*anim=*(uint8_t **)(e+0x58u);
     unsigned action=style+0x16u;

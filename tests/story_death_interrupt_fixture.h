@@ -51,7 +51,7 @@ static void death_interrupt_fixture(void) {
     *(uint32_t *)(combat+0x5c)=0x18u<<18;
     *(void **)(a+0x4c)=stats;*(void **)stats=image_base+0x2cc064u;*(void **)(stats+0x10)=a;
     SpawnEventLease *e=&spawn_events[0];memset(e,0,sizeof(*e));
-    e->used=TRUE;e->terminal=TRUE;e->state.serial=123;e->state.resource=0x5b1e8abau;
+    e->used=TRUE;e->terminal=TRUE;e->state.serial=123;e->state.resource=0x5b1e8abau;e->primary=SUDEKIMP_STORY_MONSTER_VTABLE;
     gate_bind(&e->actor,a);registry_entries[0]=a;
     *(void **)(registry+0x3c)=registry_entries;*(unsigned *)(registry+0x34)=1;
     *(void **)(image_base+RVA_REGISTRY)=registry;

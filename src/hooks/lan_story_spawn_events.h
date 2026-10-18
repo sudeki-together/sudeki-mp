@@ -2,14 +2,24 @@
  * the constructor/step/destructor seams; these are observers, not new detours.
  * Stable intrusive weak nodes distinguish destruction from address reuse. */
 #include "hooks/story_spawn_event_guard.h"
+#include "hooks/story_spawned_actor.h"
+#include "hooks/story_monster_damage_guard.h"
 enum { SPAWN_EVENT_SLOTS=128u };
 typedef struct SpawnEventLease {
     GateWeak group,actor;
     SudekiMpStorySpawnEvent state;
     uint8_t *job;
     uint32_t epoch,death,emitted;
+    /* Exact primary table the entry's resource type creates (monster or
+     * ally, E2); the actor must match it, never merely either class. */
+    unsigned primary;
     char area[SUDEKIMP_STORY_AREA_NAME];
-    BOOL used,owned,terminal;
+    BOOL used,owned,terminal,test_done;
+    /* Host: the actor left the native registry and only its native delete
+     * is pending; already recorded as despawned and out of the roster. */
+    BOOL departed,dead_seen;
+    unsigned absent_ticks;
+    unsigned test_attempts;
 } SpawnEventLease;
 static SpawnEventLease spawn_events[SPAWN_EVENT_SLOTS],*spawn_creating;
 static uint32_t spawn_event_serial;
@@ -64,8 +74,20 @@ static SpawnEventLease *spawn_event_for_job(void *raw) {
 }
 static BOOL spawn_event_actor(const SpawnEventLease *e) {
     uint8_t *a=e->actor.object;
-    return gate_weak_exact(&e->actor) && a && in_registry(a) && readable(a,0x145u) &&
-        *(void **)a==image_base+0x2d5fa0u && *(uint32_t *)(a+0x34u)==e->state.resource;
+    return gate_weak_exact(&e->actor) && a && e->primary && in_registry(a) && readable(a,0x145u) &&
+        *(void **)a==image_base+e->primary && *(uint32_t *)(a+0x34u)==e->state.resource;
+}
+/* The native registry, positively read, does not hold `entity`. An
+ * unreadable registry is unknown, never absence. */
+static BOOL spawn_event_registry_lacks(const uint8_t *entity) {
+    const uint8_t *owner=readable(image_base+RVA_REGISTRY,4u)?*(const uint8_t *const *)(image_base+RVA_REGISTRY):NULL;
+    if(!entity || !readable(owner,0x40u)) return FALSE;
+    unsigned count=*(const uint32_t *)(owner+0x34u);
+    const uint8_t *const *entries=*(const uint8_t *const *const *)(owner+0x3cu);
+    /* An empty list (a registry rebuild) proves nothing. */
+    if(!count || count>8192u || !readable(entries,count*sizeof(*entries))) return FALSE;
+    for(unsigned i=0;i<count;++i) if(entries[i]==entity) return FALSE;
+    return TRUE;
 }
 static BOOL spawn_event_identity(const void *actor,uint32_t *id) {
     if(!actor || !id || !spawn_event_begin()) return FALSE;
@@ -90,7 +112,7 @@ static void spawn_event_death_emitted(void *component,void *effect) {
         /* Research (#54 D1): a group monster whose receipt cannot be leased.
          * Only registry monsters of the exact class are worth a line. */
         static unsigned unleased_logs;
-        if(unleased_logs<32u && readable(actor,0x5cu) && *(void **)actor==image_base+0x2d5fa0u && in_registry(actor)) {
+        if(unleased_logs<32u && readable(actor,0x5cu) && SudekiMpStorySpawnedClass(image_base,*(void **)actor) && in_registry(actor)) {
             ++unleased_logs; uint32_t style_now=death_style(actor);
             SudekiMpLogFormat("story_spawn_event event=death_receipt_unleased actor=%p style=%u backlink=%u effect_kind=%02lx effect_resource=%08lx ms=%lu\r\n",
                 (void *)actor,style_now,*(void **)(actor+0x58u)==component,
@@ -155,8 +177,10 @@ static void spawn_event_constructed(void *raw) {
     uint8_t *j=raw;
     SoloJob s={.job=j,.group=*(void **)(j+0x10u),.point=*(void **)(j+0x1cu),.sequence=*(void **)(j+0x20u)};
     if(!readable(s.group,0x1b4u) || !readable(s.sequence,0x50u)) {spawn_event_refuse(__LINE__);return;}
-    /* Gates/other resources use related setup tasks. They keep their own owner. */
-    if((*(uint32_t *)(s.sequence+0xcu)&0x7fu)!=0x19u) return;
+    /* Gates/other resources use related setup tasks. They keep their own owner.
+     * Monsters and allies (E2: the castle-road gate guards) travel here. */
+    unsigned primary=SudekiMpStorySpawnedPrimary(*(uint32_t *)(s.sequence+0xcu));
+    if(!primary) return;
     s.group_id=*(uint32_t *)(s.group+0x34u);s.resource_id=*(uint32_t *)(s.sequence+0x10u);
     if(!solo_group_fields(&s) || spawn_event_for_job(raw)) {spawn_event_refuse(__LINE__);return;}
     SudekiMpStorySpawnEvent v={0}; char name[64];uint32_t id;
@@ -172,19 +196,20 @@ static void spawn_event_constructed(void *raw) {
         e=spawn_creating;
         if(!e || e->job || e->group.object!=s.group) {spawn_event_refuse(__LINE__);return;}
         v.serial=e->state.serial;
-        if(memcmp(&v,&e->state,sizeof(v))) {spawn_event_refuse(__LINE__);return;}
+        if(memcmp(&v,&e->state,sizeof(v)) || e->primary!=primary) {spawn_event_refuse(__LINE__);return;}
     } else {
         if(spawn_event_serial==UINT32_MAX) {spawn_event_refuse(__LINE__);return;}
         v.serial=++spawn_event_serial;
         if(!SudekiMpStorySpawnEventValid(&v)) {spawn_event_refuse(__LINE__);return;}
         for(unsigned i=0;i<SPAWN_EVENT_SLOTS;++i) if(!spawn_events[i].used) {e=&spawn_events[i];break;}
         if(!e) {spawn_event_refuse(__LINE__);return;}
-        e->used=TRUE;e->state=v;gate_bind(&e->group,s.group);
+        e->used=TRUE;e->state=v;e->primary=primary;gate_bind(&e->group,s.group);
     }
     e->job=raw;know_group(s.group);
-    SudekiMpLogFormat("story_spawn_event event=constructed side=%s serial=%lu group=%s point=%lu entry=%lu passes=%ld type=%08lx\r\n",
+    SudekiMpLogFormat("story_spawn_event event=constructed side=%s serial=%lu group=%s point=%lu entry=%lu passes=%ld type=%08lx class=%s\r\n",
         client_role?"client":"host",(unsigned long)v.serial,v.group,(unsigned long)v.point,
-        (unsigned long)v.entry,(long)v.passes,(unsigned long)v.resource);
+        (unsigned long)v.entry,(long)v.passes,(unsigned long)v.resource,
+        SudekiMpStorySpawnedName(image_base,image_base+primary));
 }
 static void spawn_event_step(void *raw) {
     SpawnEventLease *e=spawn_event_for_job(raw);
@@ -194,7 +219,7 @@ static void spawn_event_step(void *raw) {
         *(void **)(j+0x10u)!=e->group.object) {spawn_event_refuse(__LINE__);return;}
     SoloJob s={.job=j,.resource_id=e->state.resource};uint8_t *a=solo_actor(&s);
     if(!a) return; /* Pending native resource, never absence. */
-    if(*(void **)a!=image_base+0x2d5fa0u || !in_registry(a)) return;
+    if(!e->primary || *(void **)a!=image_base+e->primary || !in_registry(a)) return;
     if(e->actor.object && e->actor.object!=a) {spawn_event_refuse(__LINE__);return;}
     if(!e->actor.object) gate_bind(&e->actor,a);
 }
@@ -208,10 +233,34 @@ static void spawn_events_host_tick(void) {
         SpawnEventLease *e=&spawn_events[i];if(!e->used) continue;
         if(!gate_weak_exact(&e->actor) || !gate_weak_exact(&e->group)) {spawn_event_refuse(__LINE__);return;}
         if(e->actor.object) {
-            if(!spawn_event_actor(e)) continue; /* Registry change is unknown. */
-            unsigned style=death_style(e->actor.object);if(style) e->death=style;
+            if(spawn_event_actor(e)) {
+                if(e->departed) {
+                    /* A despawn already published came back: never resume an
+                     * identity the clients retired. */
+                    SudekiMpLogFormat("story_spawn_event event=departed_returned serial=%lu\r\n",(unsigned long)e->state.serial);
+                    spawn_event_refuse(__LINE__);return;
+                }
+                e->absent_ticks=0;
+                unsigned style=death_style(e->actor.object);if(style) e->death=style;
+                const uint8_t *arb=*(const uint8_t *const *)(e->actor.object+0x90u);
+                if(readable(arb,0x54u) && *(void *const *)arb==image_base+0x2cc9acu &&
+                    *(const void *const *)(arb+0x10u)==e->actor.object && (*(const uint32_t *)(arb+0x50u)&0x4000u))
+                    e->dead_seen=TRUE;
+            } else if(!e->departed && e->dead_seen && spawn_event_registry_lacks(e->actor.object)) {
+                /* A proven-dead actor positively out of the native registry
+                 * on two ticks in a row: a despawn now. The weak release
+                 * comes only with the deferred native delete (live: 0-7 s
+                 * after a death), and waiting for it held the whole effects
+                 * stream (new waves, drops, despawns). A live actor that goes
+                 * missing (a registry rebuild) keeps waiting, as before. */
+                if(++e->absent_ticks>=2u) {
+                    e->departed=TRUE;record_despawn(e->state.serial,e->death);
+                    SudekiMpLogFormat("story_spawn_event event=departed serial=%lu style=%u ms=%lu\r\n",
+                        (unsigned long)e->state.serial,e->death,(unsigned long)GetTickCount());
+                }
+            } else if(!e->departed) e->absent_ticks=0; /* any other registry change is unknown */
         } else if(!e->job && e->terminal) {
-            record_despawn(e->state.serial,e->death);
+            if(!e->departed) record_despawn(e->state.serial,e->death);
             if(!spawn_event_clear(e)) {spawn_event_refuse(__LINE__);return;}
         }
     }
@@ -225,6 +274,7 @@ BOOL SudekiMpLanStorySpawnEventsCapture(SudekiMpStoryEffectState *out) {
         SpawnEventLease *e=&spawn_events[i];if(!e->used) continue;
         if(!gate_weak_exact(&e->group) || !gate_weak_exact(&e->actor)) return FALSE;
         if(!e->group.object || !gate_zone_member(zone,e->group.object)) continue;
+        if(e->departed) continue; /* despawned; only its native delete is pending */
         if(!group_exact(e->group.object) || !in_registry(e->group.object) ||
             (e->actor.object && !spawn_event_actor(e))) return FALSE;
         if(n==SUDEKIMP_STORY_SPAWN_MAX) return FALSE; /* No truncated complete roster. */
@@ -235,6 +285,51 @@ BOOL SudekiMpLanStorySpawnEventsCapture(SudekiMpStoryEffectState *out) {
         SudekiMpStorySpawnEvent swap=result[j];result[j]=result[j-1];result[j-1]=swap;
     }
     memcpy(out->spawns,result,sizeof(result));out->spawn_count=(uint8_t)n;out->spawns_valid=1;return TRUE;
+}
+static float spawn_test_ally_fraction;
+void SudekiMpLanStorySpawnSetTestAllyHealth(float fraction) {
+    spawn_test_ally_fraction=isfinite(fraction) && fraction>0.0f && fraction<1.0f?fraction:0.0f;
+}
+/* Test aid ([StoryAreas] TestAllyHealth, host only, default off): enemies
+ * rarely pick the guards over the players, so a guard death is hard to
+ * reach. Once per leased ally, after its spawn job is over, one native
+ * DoDirectDamage hit through the exact-image damage guard leaves it at that
+ * fraction of its HP; enemy hits then finish it through native death. Game
+ * thread, outside any capture; at most one native call per service. */
+static BOOL spawn_test_ally_hp(uint8_t *a,float *hp) {
+    uint8_t *stats=readable(a+0x4cu,4u)?*(uint8_t **)(a+0x4cu):NULL;
+    if(!readable(stats,0x30u) || *(void **)stats!=image_base+0x2cc064u || *(void **)(stats+0x10u)!=a) return FALSE;
+    *hp=*(float *)(stats+0x2cu); return isfinite(*hp);
+}
+void SudekiMpLanStorySpawnTestAllyService(void) {
+    if(spawn_test_ally_fraction<=0.0f || client_role || !spawn_event_begin()) return;
+    for(unsigned i=0;i<SPAWN_EVENT_SLOTS;++i) {
+        SpawnEventLease *e=&spawn_events[i];
+        if(!e->used || e->test_done || e->primary!=SUDEKIMP_STORY_ALLY_VTABLE || e->job || !e->terminal ||
+            !e->actor.object || !spawn_event_actor(e)) continue;
+        uint8_t *a=e->actor.object; float hp=0.0f;
+        /* An unproven observation is unknown: stay armed and retry later. */
+        if(!spawn_test_ally_hp(a,&hp)) continue;
+        float amount=SudekiMpStoryTestAllyDamage(hp,spawn_test_ally_fraction);
+        if(amount<=0.0f) { e->test_done=TRUE; continue; }   /* already at or below the fraction */
+        SudekiMpStoryDamageIdentity id={a,e->state.serial,e->state.resource,0,0};
+        SudekiMpStoryDamageGuard g;
+        if(!SudekiMpStoryDamageCapture(image_base,&id,&g,visual_memory)) continue;
+        if(*(uint32_t *)(g.arbiter+0x50u)&0x4000u) { e->test_done=TRUE; continue; } /* dead */
+        /* Only when the native routine would apply it (idle guards are
+         * gated): the hit lands on their first combat frame. Never lift. */
+        if(!SudekiMpStoryDirectDamageAdmits(image_base,g.arbiter,visual_memory)) continue;
+        ++e->test_attempts;
+        ((SudekiMpStoryDirectDamage)(image_base+SUDEKIMP_RVA_DIRECT_DAMAGE))(g.combat,amount);
+        /* DoDirectDamage can retire objects: re-prove before reading back. */
+        float after=-1.0f;
+        BOOL applied=spawn_event_actor(e) && spawn_test_ally_hp(e->actor.object,&after) && after<hp-0.01f;
+        if(applied || e->test_attempts>=3u) e->test_done=TRUE;
+        SudekiMpLogFormat("story_spawn_event event=test_ally_health serial=%lu fraction=%.2f hp=%.1f amount=%.1f applied=%u attempt=%u after=%.1f\r\n",
+            (unsigned long)e->state.serial,(double)spawn_test_ally_fraction,(double)hp,(double)amount,applied,
+            e->test_attempts,(double)after);
+        return; /* at most one native call per service */
+    }
 }
 static BOOL spawn_event_retire(SpawnEventLease *e,const SudekiMpStoryEffectState *host,BOOL *entered) {
     if(e->job) return FALSE; /* Drain async work; never cancel its callback. */
@@ -286,7 +381,8 @@ BOOL SudekiMpLanStorySpawnEventsFollow(const SudekiMpStoryEffectState *host) {
         if(np>256u || ne>2048u || h->point>=np || h->entry>=ne ||
             !readable(points,np*0x80u) || !readable(entries,ne*0x50u)) continue;
         uint8_t *p=points+h->point*0x80u,*entry=entries+h->entry*0x50u;
-        if((*(uint32_t *)(entry+0xcu)&0x7fu)!=0x19u || *(uint32_t *)(entry+0x10u)!=h->resource) continue;
+        unsigned primary=SudekiMpStorySpawnedPrimary(*(uint32_t *)(entry+0xcu));
+        if(!primary || *(uint32_t *)(entry+0x10u)!=h->resource) continue;
         BOOL pending=FALSE;
         for(unsigned i=0;i<SPAWN_EVENT_SLOTS;++i) if(spawn_events[i].used && spawn_events[i].job &&
             spawn_events[i].group.object==g && spawn_events[i].state.point==h->point) pending=TRUE;
@@ -295,7 +391,7 @@ BOOL SudekiMpLanStorySpawnEventsFollow(const SudekiMpStoryEffectState *host) {
          * never overwrite an unrelated locally created actor. */
         void *old=*(void **)(p+0x6cu);uint32_t old_id;
         if(old && !spawn_event_identity(old,&old_id)) continue;
-        e->used=e->owned=TRUE;e->epoch=host->epoch;e->state=*h;strcpy(e->area,host->current);gate_bind(&e->group,g);
+        e->used=e->owned=TRUE;e->epoch=host->epoch;e->state=*h;e->primary=primary;strcpy(e->area,host->current);gate_bind(&e->group,g);
         *(uint32_t *)(g+0x18cu)=h->point;*(uint32_t *)(g+0x190u)=h->entry;*(int32_t *)(g+0x17cu)=h->passes;
         memcpy(p+0x40u,h->position,12);memcpy(p+0xcu,h->forward,12);*(uint16_t *)(p+0x78u)=(uint16_t)h->flags;
         spawn_creating=e;spawn_jobs_begin(g);entered=TRUE;spawn_event_create_native(g);spawn_jobs_end();spawn_creating=NULL;

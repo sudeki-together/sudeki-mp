@@ -1,6 +1,7 @@
 #include "hooks/lan_story_character_audio.h"
 #include "hooks/call_hook.h"
 #include "hooks/lan_arena_spirit_audio.h"
+#include "hooks/lan_story_shot_cues.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
 #include <math.h>
@@ -17,7 +18,9 @@ _Static_assert(offsetof(SudekiMpInlineHook,trampoline)==40,"native bridge trampo
 static SudekiMpLanStoryNativeRoster host_roster;
 static uint32_t stream;
 static unsigned traces;
-static const struct {const char *name;unsigned rva,size;uint32_t hash;} codes[]={
+typedef struct NativeCode {const char *name;unsigned rva,size;uint32_t hash;} NativeCode;
+typedef struct NativeRelocation {unsigned rva,target;} NativeRelocation;
+static const NativeCode codes[]={
     {"SoundBankNameId",0x16550u,53u,0x565d9efcu},
     {"SoundBankSet",0xfc3b0u,93u,0x03b9dde6u},
     {"EmitterBankSet",0x28ae50u,95u,0xf2449934u},
@@ -45,7 +48,7 @@ static const struct {const char *name;unsigned rva,size;uint32_t hash;} codes[]=
     {"BankParameter",0x287aa0u,33u,0xadb85453u},
     {"AttachmentGet",0x2846f0u,30u,0xf5f56708u},
 };
-static const struct {unsigned rva,target;} relocations[]={
+static const NativeRelocation relocations[]={
     {0x28ae6au,0x409e58u},
     {0x289e3bu,0x3c37d8u},
     {0x281a0au,0x2e1ed8u},
@@ -110,17 +113,16 @@ static uint32_t u32(const void *p) { uint32_t v; memcpy(&v,p,4u); return v; }
 static BOOL typed(uint8_t *base,void *p,unsigned size,unsigned table) {
     return memory(p,size,FALSE) && *(void **)p==base+table;
 }
-static BOOL code_exact(uint8_t *b,unsigned k) {
-    const __typeof__(codes[0]) *code=&codes[k];
+static BOOL code_match(uint8_t *b,const NativeCode *code,const NativeRelocation *table,unsigned count) {
     uint32_t hash=2166136261u;
     if(!memory(b+code->rva,code->size,FALSE))return FALSE;
     for(unsigned i=0;i<code->size;++i) {
         unsigned rva=code->rva+i;uint8_t byte=b[rva];
         if(play_hook.installed && code->rva==0xfc200u && i<play_hook.length) byte=play_hook.original[i];
-        for(unsigned j=0;j<sizeof(relocations)/sizeof(relocations[0]);++j) {
-            unsigned offset=rva-relocations[j].rva;if(offset>=4u)continue;
-            if(u32(b+relocations[j].rva)!=(uint32_t)(uintptr_t)(b+relocations[j].target))return FALSE;
-            byte=(uint8_t)((0x400000u+relocations[j].target)>>(8u*offset));break;
+        for(unsigned j=0;j<count;++j) {
+            unsigned offset=rva-table[j].rva;if(offset>=4u)continue;
+            if(u32(b+table[j].rva)!=(uint32_t)(uintptr_t)(b+table[j].target))return FALSE;
+            byte=(uint8_t)((0x400000u+table[j].target)>>(8u*offset));break;
         }
         hash=(hash^byte)*16777619u;
     }
@@ -129,6 +131,50 @@ static BOOL code_exact(uint8_t *b,unsigned k) {
         return FALSE;
     }
     return TRUE;
+}
+static BOOL code_exact(uint8_t *b,unsigned k) {
+    return code_match(b,&codes[k],relocations,sizeof(relocations)/sizeof(relocations[0]));
+}
+/* Shot audio only (never gates character audio or Initialize): the record
+ * teardown routines it calls, the native routines that write through or
+ * reclaim what a record registers, and the reclaim contract handle_state
+ * relies on. CONFIRMED_STATIC FNV under the codes[] normalisation. */
+static const NativeCode shot_codes[]={
+    {"AttachmentRelease",0x2893c0u,86u,0xeba6676fu},
+    {"AttachmentDetachAll",0x281a70u,89u,0x97b6f9b1u},
+    {"AttachmentIdleSweep",0x2897b0u,91u,0xa890ccd8u},
+    {"AttachmentStatus",0x2816c0u,92u,0x14c71fd7u},
+    {"AttachmentDelete",0x22ead0u,30u,0x900caf40u},
+    {"AttachmentDestruct",0x281ce0u,119u,0x5f4f975du},
+    {"HandleState",0x2847a0u,48u,0xc48e2947u},
+    {"CueRecycle",0x284840u,94u,0x78fdd401u},
+    {"CueNotify",0x284990u,116u,0x32d044deu},
+};
+static const NativeRelocation shot_relocations[]={
+    {0x2893f5u,0x29a0d8u},{0x2897ebu,0x409e58u},
+    {0x281ce4u,0x3c37d8u},{0x281cedu,0x2e1f34u},{0x281d51u,0x2e1ed8u},
+};
+/* Vtable entries and image literals the shot executor depends on. */
+static const struct {unsigned rva,target;} shot_slots[]={
+    {0x2e1db4u,0x22e060u},                       /* emitter [0] deleting destructor */
+    {0x2e1e58u,0x288140u},{0x2e1e5cu,0x287e10u}, /* bank +0x18 load, +0x1C unload */
+    {0x2e1f34u,0x22ead0u},{0x2e1f38u,0x281860u},{0x2e1f3cu,0x2817f0u}, /* attachment [0], +4, +8 */
+    {0x2e1f54u,0x2816c0u},{0x2e1f5cu,0x281a70u}, /* attachment +0x20 status, +0x28 detach all */
+};
+static BOOL shot_methods(uint8_t *b) {
+    if(!b) return FALSE;
+    for(unsigned k=0;k<sizeof(shot_codes)/sizeof(shot_codes[0]);++k)
+        if(!code_match(b,&shot_codes[k],shot_relocations,sizeof(shot_relocations)/sizeof(shot_relocations[0])))
+            return FALSE;
+    for(unsigned k=0;k<sizeof(shot_slots)/sizeof(shot_slots[0]);++k)
+        if(*(void **)(b+shot_slots[k].rva)!=b+shot_slots[k].target) return FALSE;
+    /* AttachmentRelease's import (KERNEL32 InterlockedDecrement, IAT RVA
+     * 0x29A0D8) and the literals native CMissile passes. */
+    HMODULE kernel=GetModuleHandleA("kernel32.dll");
+    FARPROC decrement=kernel?GetProcAddress(kernel,"InterlockedDecrement"):NULL,bound;
+    memcpy(&bound,b+0x29a0d8u,sizeof(bound));
+    return decrement && bound==decrement &&
+        !memcmp(b+0x2c621cu,"missiles.xsb",13u) && !memcmp(b+0x2d9154u,"_2D",4u);
 }
 static BOOL methods(uint8_t *b) {
     if(!b) return FALSE;
@@ -255,25 +301,33 @@ static BOOL cue_index(const AudioOwner *a,const char *name,unsigned *index) {
     }
     return FALSE;
 }
-static BOOL attachment_ready(const AudioOwner *a) {
-    uint8_t *s=a->component,*attachment=*(uint8_t **)(s+0x30u);
+static unsigned slot_cells(const uint8_t *manager,const void *slot) {
+    unsigned matches=0;
+    for(unsigned i=0;i<60;++i)if(*(void *const *)(manager+0x38u+4*i)==slot)++matches;
+    return matches;
+}
+/* `slot` is an emitter's attachment slot (attachment pointer, position,
+ * cone orientation) registered in the manager's 60-cell table. */
+static BOOL slot_ready(const uint8_t *manager,uint8_t *backend,uint8_t *slot) {
+    uint8_t *attachment=*(uint8_t **)slot;
     if(attachment) {
         if(!typed(base,attachment,0x54u,0x2e1f34u) || !u32(attachment+4u))return FALSE;
-        unsigned matches=0;
-        for(unsigned i=0;i<60;++i)if(*(void **)(a->manager+0x38u+4*i)==s+0x30u)++matches;
-        return matches==1;
+        return slot_cells(manager,slot)==1;
     }
     /* Native lazy creation can insert a 3D attachment, but may not evict a
      * different actor's attachment. Require a free manager slot and exact
      * writable linked-list insertion neighbors before native allocation. */
-    if(u32(a->manager+0x130u)>=60)return FALSE;
+    if(u32(manager+0x130u)>=60)return FALSE;
     BOOL free_slot=FALSE;
-    for(unsigned i=0;i<60;++i)if(!u32(a->manager+0x38u+4*i))free_slot=TRUE;
-    uint8_t *head=*(uint8_t **)(a->backend+0xafacu);
+    for(unsigned i=0;i<60;++i)if(!u32(manager+0x38u+4*i))free_slot=TRUE;
+    uint8_t *head=*(uint8_t **)(backend+0xafacu); /* backend proven by owner() */
     if(!free_slot || !memory(head,12,TRUE))return FALSE;
     uint8_t *next=*(uint8_t **)head,*previous=*(uint8_t **)(head+4);
     return memory(next,12,TRUE) && memory(previous,12,TRUE) &&
         *(void **)(next+4)==head && *(void **)previous==head;
+}
+static BOOL attachment_ready(const AudioOwner *a) {
+    return slot_ready(a->manager,a->backend,a->component+0x30u);
 }
 static BOOL finite_vector(const void *p,unsigned n) {
     if(!memory(p,n*sizeof(float),FALSE)) return FALSE;
@@ -319,10 +373,12 @@ static BOOL presented_origin(const AudioOwner *a,float out[3]) {
     for(unsigned i=0;i<3;++i) out[i]=v[0]*world[i]+v[1]*world[4+i]+v[2]*world[8+i]+world[12+i];
     return finite_vector(out,3);
 }
-static BOOL attachment_position_exact(const AudioOwner *a) {
-    uint8_t *p=*(uint8_t **)(a->component+0x30);
+/* An existing attachment and its whole sound list, before a native call
+ * walks it (positioning, or detaching every sound). */
+static BOOL slot_position_exact(const uint8_t *manager,uint8_t *backend,uint8_t *slot) {
+    uint8_t *p=*(uint8_t **)slot;
     if(!p) return TRUE;
-    if(!attachment_ready(a) || !memory(p,0x54,TRUE) ||
+    if(!slot_ready(manager,backend,slot) || !memory(p,0x54,TRUE) ||
         *(void **)(base+0x2e1f38u)!=base+0x281860u ||
         *(void **)(base+0x2e1f3cu)!=base+0x2817f0u ||
         *(void **)(base+0x2e1eb0u)!=base+0x22e940u) return FALSE;
@@ -343,6 +399,9 @@ static BOOL attachment_position_exact(const AudioOwner *a) {
         previous=node;node=*(uint8_t **)node;
     }
     return node==head && *(void **)(head+4)==previous;
+}
+static BOOL attachment_position_exact(const AudioOwner *a) {
+    return slot_position_exact(a->manager,a->backend,a->component+0x30u);
 }
 __attribute__((naked,noinline,used))
 static unsigned position_attachment(void *entry __attribute__((unused)),void *tuple __attribute__((unused))) {
@@ -455,10 +514,13 @@ __attribute__((naked,noinline,used)) static void invoke_play(void *entry __attri
         "pushl 32(%ebp)\n\tpushl 28(%ebp)\n\tpushl 24(%ebp)\n\tpushl 16(%ebp)\n\t"
         "call *8(%ebp)\n\tpopl %esi\n\tleave\n\tret\n\t");
 }
+static void shot_initialize(void);
 BOOL SudekiMpStoryCharacterAudioInitialize(HMODULE image,BOOL host) {
-    if(busy || SudekiMpStoryCharacterAudioRetains() || !image || !SudekiMpCheckLoadedExecutable(image) ||
-        !methods((uint8_t *)image))return FALSE;
-    base=(uint8_t *)image;host_mode=host;bound=FALSE;native_thread=0;
+    /* A quarantined shot record (pinned, never reused) does not block a new
+     * saved-story start; a retryable one does. */
+    if(busy || SudekiMpStoryCharacterAudioRetains() || SudekiMpStoryShotAudioRetains() || !image ||
+        !SudekiMpCheckLoadedExecutable(image) || !methods((uint8_t *)image))return FALSE;
+    base=(uint8_t *)image;host_mode=host;bound=FALSE;native_thread=0;shot_initialize();
     if(host && !play_hook.installed) {
         HMODULE pinned;
         if(!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
@@ -529,6 +591,8 @@ static BOOL positively_retired(const LocalCue *v) {
     uint8_t *e=entries+slot*24u;unsigned state=e[0]&63u;
     return u32(e+8)!=(v->handle>>8) || !state || state==2;
 }
+/* The guarded native CueStop/CueRetire (a test may substitute a stub). */
+static void *cue_stop_entry,*cue_retire_entry;
 static BOOL stop_cue(LocalCue *v,SudekiMpStoryCharacterAudioExact exact,void *context) {
     if(!v->handle && !v->cue)return TRUE;
     /* A zone can retire a bank before its next presentation callback. The
@@ -546,12 +610,12 @@ static BOOL stop_cue(LocalCue *v,SudekiMpStoryCharacterAudioExact exact,void *co
         if(!v->cue)v->cue=*(uint8_t **)(a.entries+(v->handle&255u)*24u+0xcu);
         if(!memory(v->cue,0x30,FALSE) || *(void **)(v->cue+8)!=a.soundbank || !exact(context))return FALSE;
         typedef unsigned (__attribute__((stdcall)) *Stop)(void *,unsigned,unsigned,void *);
-        if(((Stop)(base+0x280c30u))(a.soundbank,UINT32_MAX,0,v->cue))return FALSE;
+        if(((Stop)(cue_stop_entry?cue_stop_entry:base+0x280c30u))(a.soundbank,UINT32_MAX,0,v->cue))return FALSE;
         v->stopped=TRUE; /* Stop may free cue immediately: no further cue reads. */
     }
     if(!exact(context) || !owner(v->bank,&b) || !same_owner(&a,&b))return FALSE;
     typedef void (__attribute__((stdcall)) *Retire)(void *,uint32_t);
-    ((Retire)(base+0x284ae0u))(a.pool,v->handle);
+    ((Retire)(cue_retire_entry?cue_retire_entry:base+0x284ae0u))(a.pool,v->handle);
     if(handle_state(&b,v->handle,v->cue)!=0)return FALSE;
     v->handle=0;v->cue=NULL;v->stopped=FALSE;return TRUE;
 }
@@ -689,4 +753,450 @@ BOOL SudekiMpStoryCharacterAudioPlaySpot(const char *cue) {
     BOOL played=*(uint8_t **)(base+0x409e8cu)==a.pool && u32(a.pool+4u)!=generation;
     if(traces++<300) SudekiMpLogFormat("story_character_audio event=spot_played cue=%s played=%u\r\n",cue,(unsigned)played);
     return played;
+}
+
+/* Client shot audio (#54): ranged party weapons and Kurian Shooter missiles,
+ * played by this game itself, positionally (the 'Final Fantasy way'). One
+ * record copies one CMissile emitter/slot pair (travel +0x70/+0xA0, fire
+ * +0x84/+0xBC; constructor 0x1861C0 inlines 0x28ACA0 and slot init 0x284620)
+ * and drives it only with the routines CMissile uses (CONFIRMED_STATIC):
+ * EmitterBankSet 0x28AE50 (inactive, image literal 'missiles.xsb'), EmitterPlay
+ * 0x28AEB0 (name, &handle, 3D, 0, 0), AttachmentPosition 0x284520, CueStop
+ * 0x280C30 + CueRetire 0x284AE0 (stop_cue), AttachmentDetachAll 0x281A70 and
+ * AttachmentRelease 0x2893C0, plus the SetActive mirror (bank+0x18 +-1 and
+ * emitter+0x10, 0x586C90), in the destructor's order (0x586311-0x5863C3).
+ * The manager's attachment table stores &slot and native code writes NULL
+ * through it (idle sweep 0x2897B0, eviction), so records are static and
+ * *slot is always re-read. Travel and world fire stop on RETIRE, as the
+ * destructor stops +0x98/+0x9C. Party fire drains to its natural end with a
+ * 4 s cap: the client sees the host shot's termination, never its missile's
+ * destruction (INFERENCE deviation). Client only; failure means silence. */
+enum {SHOT_FREE,SHOT_BOUND,SHOT_PLAYING,SHOT_STOPPING,SHOT_RELEASING,SHOT_QUARANTINED};
+enum {SHOT_FIRE=1u,SHOT_TRAVEL=2u};
+enum {SHOT_SERVICE,SHOT_DRAIN,SHOT_STOP_ALL};
+#define SHOT_RECORDS 16u          /* 0..7 travel, 8..15 fire */
+#define SHOT_MISSILES_ID 0x17c6f516u /* SoundBankNameId("missiles.xsb"), 0x416550 */
+#define SHOT_CELL_LIMIT 47u       /* keep 12 of the 60 attachment cells for native owners */
+#define SHOT_RESERVE 5u           /* cue-pool entries and units left to everyone else */
+#define SHOT_PARTY_FIRE_MS 4000u
+#define SHOT_CUE_MS 10000u
+typedef struct ShotRecord {
+    uint8_t emitter[0x14],slot[0x1c];
+    LocalCue cue;
+    uint64_t space;
+    uint32_t key,emitted,started,limit,index;
+    float target[3];
+    uint8_t role,world,character,item,kind,state,spatial,active,move_pending;
+} ShotRecord;
+_Static_assert(offsetof(ShotRecord,slot)==0x14 && offsetof(ShotRecord,cue)%4==0,"shot record layout");
+static ShotRecord shot_records[SHOT_RECORDS];
+typedef struct ShotWorldNames {
+    uint64_t space;uint32_t key,emitted;uint8_t used,result;SudekiMpStoryShotCueNames names;
+} ShotWorldNames;
+static ShotWorldNames shot_world[8];
+static unsigned shot_world_next,shot_logs,shot_lifecycle_logs;
+static SudekiMpStoryShotAudioPlan shot_plan;
+static uint64_t shot_space,shot_items_logged;
+static uint32_t shot_last_present;
+static BOOL shot_space_known,shot_presented,shot_pinned,shot_claim_probed,shot_world_probed;
+static int shot_native_state=-1;
+static const char *shot_last_reason;
+/* Native entries a test may substitute (NULL: the guarded retail routine). */
+static struct {void *bank_set,*play,*position,*detach,*release;} shot_entry;
+static DWORD (WINAPI *shot_tick)(void);
+static void *shot_native(void *test,unsigned rva) {return test?test:base+rva;}
+static uint32_t shot_now(void) {return shot_tick?shot_tick():GetTickCount();}
+static BOOL shot_log(void) {if(shot_logs>=400u)return FALSE;++shot_logs;return TRUE;}
+static void shot_initialize(void) {
+    SudekiMpStoryShotAudioPlanReset(&shot_plan);
+    memset(shot_world,0,sizeof(shot_world));shot_world_next=0;
+    shot_space=0;shot_space_known=shot_presented=FALSE;shot_last_present=0;
+}
+static BOOL shot_native_ready(void) {
+    if(shot_native_state<0)shot_native_state=methods(base) && shot_methods(base);
+    return shot_native_state==1;
+}
+/* Check #7: only a quarantined record can leave a native cell or pointer
+ * into this module, so the module is pinned then, and only then. */
+static void shot_pin(void) {
+    HMODULE module;
+    if(!shot_pinned && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
+        (LPCSTR)(const void *)shot_records,&module))shot_pinned=TRUE;
+}
+static BOOL shot_retryable(const ShotRecord *r) {
+    return (r->state>=SHOT_BOUND && r->state<=SHOT_RELEASING) || (r->state==SHOT_QUARANTINED && !shot_pinned);
+}
+static const char *shot_role(const ShotRecord *r) {return r->role==SHOT_FIRE?"fire":"travel";}
+static BOOL shot_quarantine(ShotRecord *r,const char *reason) {
+    r->state=SHOT_QUARANTINED;shot_pin();
+    if(shot_log())SudekiMpLogFormat("story_shot_audio event=quarantined role=%s source=%s character=%u item=%u "
+        "key=%lu reason=%s pinned=%u\r\n",shot_role(r),r->world?"world":"party",r->character,r->item,
+        (unsigned long)r->key,reason,(unsigned)shot_pinned);
+    return FALSE;
+}
+static unsigned shot_refused(const SudekiMpStoryShotAudioAction *a,const char *reason,unsigned result) {
+    if(shot_last_reason!=reason) {
+        shot_last_reason=reason;
+        if(shot_log())SudekiMpLogFormat("story_shot_audio event=%s type=%u character=%u item=%u kind=%u key=%lu reason=%s\r\n",
+            result==SUDEKIMP_SHOT_AUDIO_DEFER?"deferred":"silent",a->type,a->character,a->item,a->vfx_kind,
+            (unsigned long)a->key,reason);
+    }
+    return result;
+}
+static BOOL shot_finite(const float v[3]) {return isfinite(v[0]) && isfinite(v[1]) && isfinite(v[2]);}
+static uint32_t bank_name_id(const char *name) {
+    uint32_t id=0;
+    for(unsigned i=0;name[i];++i) {uint8_t ch=(uint8_t)name[i];if(ch>='a' && ch<='z')ch-=32;id=(i&1u)?id*ch:id+ch;}
+    return id;
+}
+static void **bank_list(const uint8_t *manager,unsigned *count) {
+    void **list=*(void ***)(manager+0x2cu);*count=u32(manager+0x30u);
+    return *count && *count<=4096u && memory(list,*count*4u,FALSE)?list:NULL;
+}
+/* The bank native EmitterBankSet resolves for the image literal (ManagerBankFind
+ * 0x289A10 takes the first SoundBankNameId match): the only listed bank with
+ * that id, with exactly that name, resident (owner(): refcount 1..0x7FFFFFFE,
+ * +0x30 clear, SSBN soundbank). Nothing here can load a bank. */
+static uint8_t *missiles_bank(AudioOwner *out) {
+    const char *literal=(const char *)base+0x2c621cu;
+    uint8_t *manager=*(uint8_t **)(base+0x409e58u),*found=NULL;unsigned count=0,matches=0;
+    if(bank_name_id(literal)!=SHOT_MISSILES_ID || !typed(base,manager,0x15cu,0x2e1dc0u))return NULL;
+    void **list=bank_list(manager,&count);if(!list)return NULL;
+    for(unsigned i=0;i<count;++i) {
+        uint8_t *b=list[i];if(!typed(base,b,0x34u,0x2e1e40u))return NULL;
+        if(u32(b+0x14u)==SHOT_MISSILES_ID) {++matches;found=b;}
+    }
+    const char *name=found?*(const char **)(found+0x10u):NULL;
+    if(matches!=1 || !memory(name,13u,FALSE) || memcmp(name,literal,13u) || !owner(found,out))return NULL;
+    return found;
+}
+/* Check #8: before dropping the record's bank reference, re-prove the very
+ * bank it took: listed once, typed, missiles.xsb by id and name, the same
+ * soundbank, held by the emitter, and still referenced beyond this record.
+ * 1 proven; 0 not provable now (retry); -1 definitively not ours (no write). */
+static int shot_bank_proof(const ShotRecord *r) {
+    uint8_t *bank=r->cue.bank,*manager=*(uint8_t **)(base+0x409e58u);unsigned count=0,listed=0;AudioOwner a;
+    if(!typed(base,manager,0x15cu,0x2e1dc0u))return 0;
+    void **list=bank_list(manager,&count);if(!list)return 0;
+    for(unsigned i=0;i<count;++i)if(list[i]==bank)++listed;
+    if(listed!=1 || !typed(base,bank,0x34u,0x2e1e40u) || u32(bank+0x14u)!=SHOT_MISSILES_ID ||
+        *(uint8_t **)(bank+0x1cu)!=r->cue.soundbank || *(uint8_t **)(r->emitter+4u)!=bank)return -1;
+    const char *name=*(const char **)(bank+0x10u);
+    if(!memory(name,13u,FALSE) || memcmp(name,"missiles.xsb",13u) || u32(bank+0x18u)<2u)return -1;
+    return missiles_bank(&a)==bank && a.soundbank==r->cue.soundbank;
+}
+static BOOL shot_capacity(const AudioOwner *a) {
+    if(!play_available(a) || u32(a->pool+0xcu)<SHOT_RESERVE)return FALSE;
+    unsigned free_entries=0;
+    for(unsigned i=0;i<a->count;++i)if(!(a->entries[i*24u]&63u))++free_entries;
+    return free_entries>=SHOT_RESERVE;
+}
+/* EmitterBankSet: ESI = emitter, push name, RET 4, AL = bank found. */
+__attribute__((naked,noinline,used)) static unsigned invoke_bank_set(void *entry __attribute__((unused)),
+    void *emitter __attribute__((unused)),const char *name __attribute__((unused))) {
+    __asm__ volatile("pushl %ebp\n\tmovl %esp,%ebp\n\tpushl %ebx\n\tpushl %esi\n\tpushl %edi\n\t"
+        "movl 12(%ebp),%esi\n\tpushl 16(%ebp)\n\tcall *8(%ebp)\n\tmovzbl %al,%eax\n\t"
+        "popl %edi\n\tpopl %esi\n\tpopl %ebx\n\tleave\n\tret\n\t");
+}
+/* EmitterPlay: EAX = emitter, (name, &handle, 3D, rows=0, count=0), RET 0x14,
+ * EAX 0 = ok. The handle is zeroed on entry and written only on success. */
+__attribute__((naked,noinline,used)) static unsigned invoke_emitter_play(void *entry __attribute__((unused)),
+    void *emitter __attribute__((unused)),const char *name __attribute__((unused)),
+    uint32_t *handle __attribute__((unused)),uint32_t spatial __attribute__((unused))) {
+    __asm__ volatile("pushl %ebp\n\tmovl %esp,%ebp\n\tpushl %ebx\n\tpushl %esi\n\tpushl %edi\n\t"
+        "pushl $0\n\tpushl $0\n\tpushl 24(%ebp)\n\tpushl 20(%ebp)\n\tpushl 16(%ebp)\n\t"
+        "movl 12(%ebp),%eax\n\tcall *8(%ebp)\n\t"
+        "popl %edi\n\tpopl %esi\n\tpopl %ebx\n\tleave\n\tret\n\t");
+}
+/* AttachmentRelease: EDI = manager, EDX = &slot, push attachment, RET 4.
+ * 0 after clearing the matching cell; 0x80070057 when no cell matches. */
+__attribute__((naked,noinline,used)) static unsigned invoke_release(void *entry __attribute__((unused)),
+    void *manager __attribute__((unused)),void *slot __attribute__((unused)),void *attachment __attribute__((unused))) {
+    __asm__ volatile("pushl %ebp\n\tmovl %esp,%ebp\n\tpushl %ebx\n\tpushl %esi\n\tpushl %edi\n\t"
+        "movl 12(%ebp),%edi\n\tmovl 16(%ebp),%edx\n\tpushl 20(%ebp)\n\tcall *8(%ebp)\n\t"
+        "popl %edi\n\tpopl %esi\n\tpopl %ebx\n\tleave\n\tret\n\t");
+}
+/* AttachmentDetachAll: stdcall(attachment), RET 4. */
+__attribute__((naked,noinline,used)) static unsigned invoke_detach(void *entry __attribute__((unused)),
+    void *attachment __attribute__((unused))) {
+    __asm__ volatile("pushl %ebp\n\tmovl %esp,%ebp\n\tpushl %ebx\n\tpushl %esi\n\tpushl %edi\n\t"
+        "pushl 12(%ebp)\n\tcall *8(%ebp)\n\tpopl %edi\n\tpopl %esi\n\tpopl %ebx\n\tleave\n\tret\n\t");
+}
+/* RELEASING -> FREE only with the cue positively retired. A failure that
+ * leaves native state referring to the record quarantines it. */
+static BOOL shot_release(ShotRecord *r,SudekiMpStoryCharacterAudioExact exact,void *context) {
+    if(r->cue.handle || r->cue.cue || !exact(context) || !shot_native_ready())return FALSE;
+    uint8_t *manager=*(uint8_t **)(base+0x409e58u),*slot=r->slot,*attachment=*(uint8_t **)slot;
+    if(!typed(base,manager,0x15cu,0x2e1dc0u))return FALSE;
+    if(attachment) {
+        if(!slot_position_exact(manager,*(uint8_t **)(manager+0x10u),slot))
+            return shot_quarantine(r,"attachment_unproven");
+        (void)invoke_detach(shot_native(shot_entry.detach,0x281a70u),attachment);
+        if(*(uint8_t **)slot!=attachment)return shot_quarantine(r,"attachment_changed");
+        if(invoke_release(shot_native(shot_entry.release,0x2893c0u),manager,slot,attachment))
+            return shot_quarantine(r,"attachment_release");
+        memset(slot,0,4u);
+    }
+    if(slot_cells(manager,slot))return shot_quarantine(r,"cell_retained");
+    if(r->active) {
+        int proof=shot_bank_proof(r);
+        if(proof<0)return shot_quarantine(r,"bank_reference");
+        if(!proof)return FALSE;
+        /* SetActive(0) mirror; bank+0x18 >= 2, so never the unload at +0x1C. */
+        uint32_t refs=u32(r->cue.bank+0x18u)-1u;memcpy(r->cue.bank+0x18u,&refs,4u);
+        r->emitter[0x10u]=0;r->active=0;
+    }
+    if(shot_lifecycle_logs<32u && shot_log()) {
+        ++shot_lifecycle_logs;
+        SudekiMpLogFormat("story_shot_audio event=released role=%s source=%s character=%u key=%lu\r\n",
+            shot_role(r),r->world?"world":"party",r->character,(unsigned long)r->key);
+    }
+    memset(r,0,sizeof(*r));return TRUE;
+}
+static BOOL shot_move(ShotRecord *r,SudekiMpStoryCharacterAudioExact exact,void *context) {
+    uint8_t *slot=r->slot,*manager=*(uint8_t **)(base+0x409e58u);
+    if(!r->move_pending)return TRUE;
+    /* Check #13: the idle sweep released a finished cue's attachment and
+     * cleared the slot; nothing native remains to move. */
+    if(!*(void **)slot) {r->move_pending=0;return TRUE;}
+    for(unsigned i=0;i<sizeof(codes)/sizeof(codes[0]);++i) {
+        unsigned rva=codes[i].rva;
+        if((rva==0x284520u || rva==0x281860u || rva==0x2817f0u || rva==0x22e940u) && !code_exact(base,i))return FALSE;
+    }
+    if(!exact(context) || !typed(base,manager,0x15cu,0x2e1dc0u) ||
+        !slot_position_exact(manager,*(uint8_t **)(manager+0x10u),slot))return FALSE;
+    memcpy(slot+4u,r->target,12u);
+    if(position_attachment(shot_native(shot_entry.position,0x284520u),slot))return FALSE;
+    r->move_pending=0;return TRUE;
+}
+static void shot_advance(ShotRecord *r,uint32_t now,unsigned mode,SudekiMpStoryCharacterAudioExact exact,void *context) {
+    if(r->state==SHOT_FREE)return;
+    if(r->state==SHOT_QUARANTINED) {shot_pin();return;}
+    if(r->state==SHOT_BOUND)r->state=SHOT_RELEASING;
+    if(r->state==SHOT_PLAYING) {
+        /* Check #13: a finished cue (travel included) releases at once. */
+        if(positively_retired(&r->cue)) {
+            r->cue.handle=0;r->cue.cue=NULL;r->cue.stopped=FALSE;r->state=SHOT_RELEASING;
+        } else if(mode==SHOT_STOP_ALL || (mode==SHOT_DRAIN && (r->role==SHOT_TRAVEL || r->world)) ||
+            (int32_t)(now-r->started)>(int32_t)r->limit) r->state=SHOT_STOPPING;
+        else if(r->move_pending)(void)shot_move(r,exact,context);
+    }
+    if(r->state==SHOT_STOPPING && stop_cue(&r->cue,exact,context)) {
+        r->state=SHOT_RELEASING;
+        if(shot_lifecycle_logs<32u && shot_log()) {
+            ++shot_lifecycle_logs;
+            SudekiMpLogFormat("story_shot_audio event=stopped role=%s source=%s character=%u key=%lu\r\n",
+                shot_role(r),r->world?"world":"party",r->character,(unsigned long)r->key);
+        }
+    }
+    if(r->state==SHOT_RELEASING)(void)shot_release(r,exact,context);
+}
+/* Cue names from this game's own data (resolver; read-only, no native call).
+ * World pairings are cached per instance so both cues use one answer. */
+static unsigned shot_names(const SudekiMpStoryShotAudioAction *act,BOOL world,SudekiMpStoryShotCueNames *out) {
+    unsigned result=SUDEKIMP_SHOT_CUES_SILENT;
+    memset(out,0,sizeof(*out));
+    if(world)for(unsigned i=0;i<sizeof(shot_world)/sizeof(shot_world[0]);++i) {
+        const ShotWorldNames *w=&shot_world[i];
+        if(w->used && w->space==shot_space && w->key==act->key && w->emitted==act->emitted_tick) {
+            *out=w->names;return w->result;
+        }
+    }
+    if(SudekiMpStoryShotCuesImageMatches((HMODULE)base))
+        result=world?SudekiMpStoryShotCuesForWorldMissile((HMODULE)base,act->vfx_kind,act->position,out):
+            SudekiMpStoryShotCuesForItem((HMODULE)base,act->character,act->item,out);
+    if(result==SUDEKIMP_SHOT_CUES_DEFER)return result;
+    if(result!=SUDEKIMP_SHOT_CUES_OK || !memchr(out->travel,0,sizeof(out->travel)) ||
+        !memchr(out->fire,0,sizeof(out->fire))) {result=SUDEKIMP_SHOT_CUES_SILENT;memset(out,0,sizeof(*out));}
+    if(world) {
+        ShotWorldNames *w=&shot_world[shot_world_next++%(sizeof(shot_world)/sizeof(shot_world[0]))];
+        *w=(ShotWorldNames){.space=shot_space,.key=act->key,.emitted=act->emitted_tick,.used=1,
+            .result=(uint8_t)result,.names=*out};
+        if(!shot_world_probed && shot_log()) {
+            shot_world_probed=TRUE;
+            SudekiMpLogFormat("story_shot_audio event=pairing kind=%u key=%lu result=%u travel=%s fire=%s\r\n",
+                act->vfx_kind,(unsigned long)act->key,result,out->travel,out->fire);
+        }
+    } else if(result==SUDEKIMP_SHOT_CUES_OK && act->item<64u && !(shot_items_logged&(1ull<<act->item)) && shot_log()) {
+        shot_items_logged|=1ull<<act->item;
+        SudekiMpLogFormat("story_shot_audio event=probe character=%u item=%u travel=%s fire=%s\r\n",
+            act->character,act->item,out->travel,out->fire);
+    }
+    return result;
+}
+static unsigned shot_start(const SudekiMpStoryShotAudioAction *act,const SudekiMpLanStoryNativeRoster *roster,
+    const SudekiMpStoryShotAudioInput *in,SudekiMpStoryCharacterAudioExact exact,void *context) {
+    BOOL world=act->type==SUDEKIMP_SHOT_AUDIO_WORLD_FIRE || act->type==SUDEKIMP_SHOT_AUDIO_WORLD_TRAVEL;
+    unsigned role=act->type==SUDEKIMP_SHOT_AUDIO_PARTY_FIRE || act->type==SUDEKIMP_SHOT_AUDIO_WORLD_FIRE?
+        SHOT_FIRE:SHOT_TRAVEL;
+    if((!world && act->character>=4u) || !shot_finite(act->position))
+        return shot_refused(act,"action",SUDEKIMP_SHOT_AUDIO_SILENT);
+    for(unsigned i=0;i<SHOT_RECORDS;++i) {
+        const ShotRecord *r=&shot_records[i];
+        if(r->state!=SHOT_FREE && r->state!=SHOT_QUARANTINED && r->space==shot_space && r->key==act->key &&
+            r->emitted==act->emitted_tick && r->role==role && r->world==world && r->character==act->character)
+            return shot_refused(act,"duplicate",SUDEKIMP_SHOT_AUDIO_SILENT);
+    }
+    if(!shot_native_ready())return shot_refused(act,"native_guards",SUDEKIMP_SHOT_AUDIO_SILENT);
+    SudekiMpStoryShotCueNames names;unsigned resolved=shot_names(act,world,&names);
+    if(resolved==SUDEKIMP_SHOT_CUES_DEFER)return shot_refused(act,"cue_source",SUDEKIMP_SHOT_AUDIO_DEFER);
+    if(resolved!=SUDEKIMP_SHOT_CUES_OK)return shot_refused(act,"cue_source",SUDEKIMP_SHOT_AUDIO_SILENT);
+    const char *wanted=role==SHOT_FIRE?names.fire:names.travel;
+    if(!*wanted)return SUDEKIMP_SHOT_AUDIO_SILENT; /* native skips an empty name (0x587107, 0x58714D) */
+    if(!listener_exact())return shot_refused(act,"listener",SUDEKIMP_SHOT_AUDIO_DEFER);
+    AudioOwner a,b;uint8_t *bank=missiles_bank(&a);
+    if(!bank)return shot_refused(act,"missiles_bank",SUDEKIMP_SHOT_AUDIO_DEFER);
+    /* Native _2D rule (0x58714F): only this game's own controlled shooter
+     * hears its fire cue unpositioned. Check #3: the planner's flag, the
+     * proven local character and the presented native leader must agree. */
+    BOOL local=role==SHOT_FIRE && !world && act->local && in->local_character==act->character &&
+        roster && roster->leader_character==act->character;
+    unsigned index=0;BOOL found=FALSE;
+    if(local) {
+        char variant[sizeof(names.fire)+4u];size_t n=strlen(wanted);
+        memcpy(variant,wanted,n);memcpy(variant+n,"_2D",4u);found=cue_index(&a,variant,&index);
+    }
+    if(!found && !cue_index(&a,wanted,&index))return shot_refused(act,"cue_missing",SUDEKIMP_SHOT_AUDIO_SILENT);
+    const char *name=cue_name(&a,index);
+    if(!name)return shot_refused(act,"cue_missing",SUDEKIMP_SHOT_AUDIO_SILENT);
+    unsigned spatial=local?0u:1u;
+    ShotRecord *r=NULL;
+    for(unsigned i=role==SHOT_FIRE?8u:0u,end=i+8u;i<end && !r;++i)if(shot_records[i].state==SHOT_FREE)r=&shot_records[i];
+    if(!r)return shot_refused(act,"records",SUDEKIMP_SHOT_AUDIO_DEFER);
+    if(*(void **)r->slot || slot_cells(a.manager,r->slot)) {
+        r->role=(uint8_t)role;r->world=(uint8_t)world; /* names the pool in the log */
+        (void)shot_quarantine(r,"slot_registered");
+        return shot_refused(act,"slot_registered",SUDEKIMP_SHOT_AUDIO_DEFER);
+    }
+    /* CMissile constructor stores (0x58622D-0x586257): emitter vtable, no
+     * bank, no slot, no reserve, inactive; slot: no attachment, origin,
+     * cone orientation (0,0,1). Only this module can see the record yet. */
+    memset(r,0,sizeof(*r));
+    void *vtable=base+0x2e1db4u;float one=1.0f;
+    memcpy(r->emitter,&vtable,4u);memcpy(r->slot+0x18u,&one,4u);
+    a.emitter=r->emitter;
+    if(!shot_capacity(&a))return shot_refused(act,"native_play_capacity",SUDEKIMP_SHOT_AUDIO_DEFER);
+    if(spatial && (u32(a.manager+0x130u)>SHOT_CELL_LIMIT || !slot_ready(a.manager,a.backend,r->slot)))
+        return shot_refused(act,"native_attachment",SUDEKIMP_SHOT_AUDIO_DEFER);
+    if(!exact(context))return shot_refused(act,"presentation",SUDEKIMP_SHOT_AUDIO_DEFER);
+    if(!shot_claim_probed) {
+        unsigned pool_free=0,strings=0;uint8_t *table=*(uint8_t **)(base+0x409e10u);
+        for(unsigned i=0;i<a.count;++i)if(!(a.entries[i*24u]&63u))++pool_free;
+        if(typed(base,table,0x14u,0x2dcc8cu))strings=u32(table+8u);
+        shot_claim_probed=TRUE;
+        if(shot_log())SudekiMpLogFormat("story_shot_audio event=probe bank_refs=%u cells=%u pool_free=%u "
+            "pool_units=%u strings=%u\r\n",u32(bank+0x18u),u32(a.manager+0x130u),pool_free,u32(a.pool+0xcu),strings);
+    }
+    /* Claim (FREE -> BOUND). Inactive, so the bank is stored without a
+     * reference and nothing is released or loaded (0x68AE50-0x68AEAC). */
+    uint32_t refs=u32(bank+0x18u);
+    unsigned bank_found=invoke_bank_set(shot_native(shot_entry.bank_set,0x28ae50u),r->emitter,(const char *)base+0x2c621cu);
+    if(!bank_found || *(uint8_t **)(r->emitter+4u)!=bank || u32(bank+0x18u)!=refs || r->emitter[0x10u]) {
+        memset(r,0,sizeof(*r));return shot_refused(act,"emitter_bank",SUDEKIMP_SHOT_AUDIO_SILENT);
+    }
+    void *slot=r->slot;memcpy(r->emitter+8u,&slot,4u);
+    if(!owner(bank,&b) || !same_owner(&a,&b) || !exact(context)) {
+        memset(r,0,sizeof(*r));return shot_refused(act,"bank_owner",SUDEKIMP_SHOT_AUDIO_DEFER);
+    }
+    /* SetActive(1) mirror (0x586C90): resident bank, so never the 0->1 load. */
+    refs=u32(bank+0x18u)+1u;memcpy(bank+0x18u,&refs,4u);r->emitter[0x10u]=1;r->active=1;
+    r->state=SHOT_BOUND;r->cue=(LocalCue){.bank=bank,.soundbank=a.soundbank,.pool=a.pool};
+    r->space=shot_space;r->key=act->key;r->emitted=act->emitted_tick;r->role=(uint8_t)role;r->world=(uint8_t)world;
+    r->character=act->character;r->item=act->item;r->kind=act->vfx_kind;r->spatial=(uint8_t)spatial;r->index=index;
+    r->limit=role==SHOT_FIRE && !world?SHOT_PARTY_FIRE_MS:SHOT_CUE_MS;r->started=in->now;
+    /* Both CMissile slots start at the launch point (0x586EEF-0x586F56). */
+    memcpy(r->slot+4u,act->position,12u);memcpy(r->target,act->position,12u);
+    unsigned status=invoke_emitter_play(shot_native(shot_entry.play,0x28aeb0u),r->emitter,name,&r->cue.handle,spatial);
+    if(!r->cue.handle) {
+        shot_advance(r,in->now,SHOT_SERVICE,exact,context);
+        return shot_refused(act,"native_returned_no_handle",SUDEKIMP_SHOT_AUDIO_SILENT);
+    }
+    /* The returned handle is published first: any failure below still owes
+     * a stop of exactly that handle. */
+    uint8_t *cue=NULL;
+    if(!status && exact(context) && owner(bank,&b) && same_owner(&a,&b) && handle_state(&b,r->cue.handle,NULL)==1) {
+        cue=*(uint8_t **)(b.entries+(r->cue.handle&255u)*24u+0xcu);
+        if(!memory(cue,0x30u,FALSE) || *(void **)(cue+8u)!=a.soundbank || u32(cue+4u)!=index)cue=NULL;
+    }
+    if(!cue) {
+        r->state=SHOT_STOPPING;shot_advance(r,in->now,SHOT_SERVICE,exact,context);
+        return shot_refused(act,"returned_handle_owner",SUDEKIMP_SHOT_AUDIO_SILENT);
+    }
+    r->cue.cue=cue;r->state=SHOT_PLAYING;shot_last_reason=NULL;
+    if(shot_log())SudekiMpLogFormat("story_shot_audio event=played role=%s source=%s character=%u item=%u kind=%u "
+        "key=%lu cue=%s spatial=%u handle=%lu\r\n",shot_role(r),world?"world":"party",act->character,act->item,
+        act->vfx_kind,(unsigned long)act->key,name,spatial,(unsigned long)r->cue.handle);
+    return SUDEKIMP_SHOT_AUDIO_PLAYED;
+}
+static unsigned shot_execute(const SudekiMpStoryShotAudioAction *act,const SudekiMpLanStoryNativeRoster *roster,
+    const SudekiMpStoryShotAudioInput *in,SudekiMpStoryCharacterAudioExact exact,void *context) {
+    switch(act->type) {
+    case SUDEKIMP_SHOT_AUDIO_PARTY_FIRE: case SUDEKIMP_SHOT_AUDIO_PARTY_TRAVEL:
+    case SUDEKIMP_SHOT_AUDIO_WORLD_FIRE: case SUDEKIMP_SHOT_AUDIO_WORLD_TRAVEL:
+        return shot_start(act,roster,in,exact,context);
+    case SUDEKIMP_SHOT_AUDIO_MOVE:
+        for(unsigned i=0;i<SHOT_RECORDS;++i) {
+            ShotRecord *r=&shot_records[i];
+            if(r->state!=SHOT_PLAYING || r->role!=SHOT_TRAVEL || r->space!=shot_space || r->key!=act->key)continue;
+            if(!shot_finite(act->position))return SUDEKIMP_SHOT_AUDIO_SILENT;
+            if(memcmp(r->target,act->position,12u)) {memcpy(r->target,act->position,12u);r->move_pending=1;}
+            return shot_move(r,exact,context)?SUDEKIMP_SHOT_AUDIO_PLAYED:SUDEKIMP_SHOT_AUDIO_DEFER;
+        }
+        return SUDEKIMP_SHOT_AUDIO_SILENT;
+    case SUDEKIMP_SHOT_AUDIO_RETIRE: {
+        unsigned matched=0;
+        for(unsigned i=0;i<SHOT_RECORDS;++i) {
+            ShotRecord *r=&shot_records[i];
+            if(r->state!=SHOT_PLAYING || r->space!=shot_space || r->key!=act->key ||
+                (r->role!=SHOT_TRAVEL && !r->world))continue;
+            r->state=SHOT_STOPPING;shot_advance(r,in->now,SHOT_SERVICE,exact,context);++matched;
+        }
+        return matched?SUDEKIMP_SHOT_AUDIO_PLAYED:SUDEKIMP_SHOT_AUDIO_SILENT;
+    }
+    default: return SUDEKIMP_SHOT_AUDIO_SILENT;
+    }
+}
+BOOL SudekiMpStoryShotAudioPresent(const SudekiMpLanStoryNativeRoster *roster,
+    const SudekiMpStoryShotAudioInput *input,SudekiMpStoryCharacterAudioExact exact,void *context) {
+    if(host_mode || busy || !base || !input || !exact || (native_thread && native_thread!=GetCurrentThreadId()) ||
+        !exact(context))return FALSE;
+    native_thread=GetCurrentThreadId();busy=TRUE;shot_native_state=-1;
+    if(shot_space_known && shot_space!=input->namespace_token) {
+        /* A new session/lease/stream: its keys are a new namespace. Stop the
+         * old cues that follow host visuals; party fire drains as usual. */
+        for(unsigned i=0;i<SHOT_RECORDS;++i) {
+            ShotRecord *r=&shot_records[i];
+            if(r->state==SHOT_PLAYING && (r->role==SHOT_TRAVEL || r->world))r->state=SHOT_STOPPING;
+        }
+        memset(shot_world,0,sizeof(shot_world));
+    }
+    shot_space=input->namespace_token;shot_space_known=TRUE;
+    for(unsigned i=0;i<SHOT_RECORDS;++i)shot_advance(&shot_records[i],input->now,SHOT_SERVICE,exact,context);
+    SudekiMpStoryShotAudioAction actions[SUDEKIMP_SHOT_AUDIO_MAX_ACTIONS];
+    unsigned count=SudekiMpStoryShotAudioPlanStep(&shot_plan,input,actions,SUDEKIMP_SHOT_AUDIO_MAX_ACTIONS);
+    if(count>SUDEKIMP_SHOT_AUDIO_MAX_ACTIONS)count=SUDEKIMP_SHOT_AUDIO_MAX_ACTIONS;
+    for(unsigned i=0;i<count;++i)
+        SudekiMpStoryShotAudioPlanCommit(&shot_plan,&actions[i],shot_execute(&actions[i],roster,input,exact,context));
+    shot_last_present=input->now;shot_presented=TRUE;busy=FALSE;return TRUE;
+}
+BOOL SudekiMpStoryShotAudioRetains(void) {
+    for(unsigned i=0;i<SHOT_RECORDS;++i)if(shot_retryable(&shot_records[i]))return TRUE;
+    return FALSE;
+}
+BOOL SudekiMpStoryShotAudioNeedsService(uint32_t now) {
+    return SudekiMpStoryShotAudioRetains() && (!shot_presented || (int32_t)(now-shot_last_present)>250);
+}
+static BOOL shot_teardown(unsigned mode,SudekiMpStoryCharacterAudioExact exact,void *context) {
+    if(!SudekiMpStoryShotAudioRetains())return TRUE;
+    if(host_mode || busy || !base || !exact || (native_thread && native_thread!=GetCurrentThreadId()) ||
+        !exact(context))return FALSE;
+    busy=TRUE;shot_native_state=-1;uint32_t now=shot_now();
+    for(unsigned i=0;i<SHOT_RECORDS;++i)shot_advance(&shot_records[i],now,mode,exact,context);
+    busy=FALSE;return !SudekiMpStoryShotAudioRetains();
+}
+BOOL SudekiMpStoryShotAudioDrain(SudekiMpStoryCharacterAudioExact exact,void *context) {
+    return shot_teardown(SHOT_DRAIN,exact,context);
+}
+BOOL SudekiMpStoryShotAudioStop(SudekiMpStoryCharacterAudioExact exact,void *context) {
+    return shot_teardown(SHOT_STOP_ALL,exact,context);
 }

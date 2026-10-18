@@ -1273,6 +1273,26 @@ static void test_visual_matrix_and_native_null(void) {
     snapshot.spirit_vfx[0].scale[0] = -1.0f;
     CHECK(!SudekiMpLanArenaSpiritVfxVisualMatrix(&snapshot.spirit_vfx[0], matrix));
     snapshot.spirit_vfx[0].scale[0] = 1.0f;
+    {   /* An aimed weapon flash (Ailish kind 36) pitched down by p: the wire
+         * frame is a rotation about X; the client rebuilds the native rows
+         * X=(dz,0,-dx), Y=(0,1,0), Z=d. A tracked flash (kind 35) keeps the
+         * plain rotation. */
+        SudekiMpLanArenaSpiritVfxSnapshot aimed = snapshot.spirit_vfx[0];
+        const float p = 0.4f;
+        aimed.kind = 36u; aimed.owner_actor_type = 0x01u; aimed.skill_sequence = 0u;
+        aimed.rotation_xyzw[0] = sinf(p / 2.0f); aimed.rotation_xyzw[1] = 0.0f;
+        aimed.rotation_xyzw[2] = 0.0f; aimed.rotation_xyzw[3] = cosf(p / 2.0f);
+        aimed.scale[0] = cosf(p); aimed.scale[1] = 1.0f; aimed.scale[2] = 1.0f;
+        if (SudekiMpLanVisualOwnerValidForPresentation(&aimed)) {
+            CHECK(SudekiMpLanArenaSpiritVfxVisualMatrix(&aimed, matrix));
+            CHECK(fabsf(matrix[0] - cosf(p)) < 0.0001f && fabsf(matrix[1]) < 0.0001f && fabsf(matrix[2]) < 0.0001f);
+            CHECK(fabsf(matrix[4]) < 0.0001f && fabsf(matrix[5] - 1.0f) < 0.0001f && fabsf(matrix[6]) < 0.0001f);
+            CHECK(fabsf(matrix[8]) < 0.0001f && fabsf(matrix[9] + sinf(p)) < 0.0001f && fabsf(matrix[10] - cosf(p)) < 0.0001f);
+            aimed.kind = 35u;
+            CHECK(SudekiMpLanArenaSpiritVfxVisualMatrix(&aimed, matrix));
+            CHECK(fabsf(matrix[5] - cosf(p)) < 0.0001f && fabsf(matrix[6] - sinf(p)) < 0.0001f);
+        } else CHECK(!"aimed flash owner not admitted");
+    }
     test.spawn_null = TRUE;
     CHECK(SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state, &snapshot, 10u, &api));
     CHECK(SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state, &snapshot, 10u, &api));

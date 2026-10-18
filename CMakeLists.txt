@@ -180,6 +180,9 @@ add_library(SudekiMP SHARED
     src/hooks/interaction_provenance.c
     src/hooks/lan_arena_campaign_guard.c
     src/hooks/lan_arena_window_policy.c
+    src/network/lan_story_shot_audio.c
+    src/hooks/lan_story_shot_cues.c
+    src/hooks/background_audio.c
     src/hooks/lan_arena_runtime.c
     src/hooks/lan_arena_hit_feedback.c
     src/hooks/lan_arena_ranged_aim.c
@@ -2198,6 +2201,25 @@ add_executable(SudekiMP.StoryNpcGestureImageTest tests/story_npc_gesture_image_t
 target_include_directories(SudekiMP.StoryNpcGestureImageTest PRIVATE src)
 target_compile_options(SudekiMP.StoryNpcGestureImageTest PRIVATE -Wall -Wextra -Werror -Wno-attributes -UNDEBUG)
 set_target_properties(SudekiMP.StoryNpcGestureImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.BackgroundAudioImageTest tests/background_audio_image_test.c)
+target_include_directories(SudekiMP.BackgroundAudioImageTest PRIVATE src)
+target_compile_options(SudekiMP.BackgroundAudioImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.BackgroundAudioImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryShotAudioPlanTest tests/story_shot_audio_plan_test.c
+    src/network/lan_story_shot_audio.c ${SUDEKIMP_STORY_ACTION_TEST_SOURCES})
+target_include_directories(SudekiMP.StoryShotAudioPlanTest PRIVATE src)
+target_compile_definitions(SudekiMP.StoryShotAudioPlanTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.StoryShotAudioPlanTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryShotAudioPlanTest PRIVATE ws2_32 bcrypt)
+set_target_properties(SudekiMP.StoryShotAudioPlanTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryShotCuesTest tests/story_shot_cues_test.c)
+target_include_directories(SudekiMP.StoryShotCuesTest PRIVATE src)
+target_compile_options(SudekiMP.StoryShotCuesTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.StoryShotCuesTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryShotCuesImageTest tests/story_shot_cues_image_test.c)
+target_include_directories(SudekiMP.StoryShotCuesImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryShotCuesImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.StoryShotCuesImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_executable(SudekiMP.StoryRejoinSpotTest tests/story_rejoin_spot_test.c)
 target_include_directories(SudekiMP.StoryRejoinSpotTest PRIVATE src)
 target_compile_options(SudekiMP.StoryRejoinSpotTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)

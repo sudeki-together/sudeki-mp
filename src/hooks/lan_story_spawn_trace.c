@@ -2,6 +2,7 @@
 #include "hooks/call_hook.h"
 #include "hooks/story_spawn_sigil.h"
 #include "hooks/story_death_visual.h"
+#include "hooks/story_spawned_actor.h"
 #include "hooks/lan_arena_spirit_visual_host.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
@@ -423,7 +424,7 @@ static void cache_identity(const void *monster,uint32_t identity) {
     identity_next=(identity_next+1u)%64u;
 }
 static unsigned death_style(const uint8_t *e) {
-    if(!image_base || !readable(e,0xa8u) || *(void *const *)e!=image_base+0x2d5fa0u) return 0;
+    if(!image_base || !readable(e,0xa8u) || !SudekiMpStorySpawnedClass(image_base,*(void *const *)e)) return 0;
     const uint8_t *combat=*(const uint8_t *const *)(e+0xa4u);
     const uint8_t *arb=*(const uint8_t *const *)(e+0x90u);
     if(!readable(combat,0x60u) || *(void *const *)combat!=image_base+0x2c8754u ||

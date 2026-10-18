@@ -71,6 +71,16 @@ static BOOL prepare_game(const SudekiMpLobbyLaunchPlan *plan) {
     if (status.start.destination!=SUDEKIMP_LOBBY_DEST_SAVEDGAME) return FALSE;
     return SudekiMpLobbyGameplayPrepareSaved(plan,&status.saved_game);
 }
+/* A refused prepare names its real stage: a mod hook that would not install
+ * is this build's fault, not a save mismatch. */
+static void prepare_failure_text(unsigned destination,const char *save_text) {
+    DWORD error=launch_available?SudekiMpLobbyGameplayRuntimeFailure():0;
+    if (error)
+        snprintf(message,sizeof(message),"Could not start: the SudekiMP %s runtime failed to install (error %lu). See the game log.",
+            destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME?"story":"Test Room",(unsigned long)error);
+    else strcpy(message,destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME?save_text:
+        "Could not prepare Test Room. See the game log for details.");
+}
 static void service_running_join(void) {
     unsigned player_slot=status.local_slot;
     const SudekiMpLobbyAdmission *a=&status.admission[player_slot];
@@ -112,9 +122,10 @@ static void service_running_join(void) {
         snprintf(p.host_ipv4,sizeof(p.host_ipv4),"%s",status.host_ipv4);
         if (!launch_available || !prepare_game(&p)) {
             SudekiMpLobbyAdmissionAck(session,a->sequence,a->ticket,SUDEKIMP_LOBBY_ACK_FAILED);
-            strcpy(message,status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME?
-                "Could not prepare the selected save. This game needs a matching local copy.":
-                "The Test Room could not prepare this join. No character control was granted.");
+            if(status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME)
+                prepare_failure_text(status.start.destination,
+                    "Could not prepare the selected save. This game needs a matching local copy.");
+            else strcpy(message,"The Test Room could not prepare this join. No character control was granted.");
             return;
         }
     }
@@ -183,9 +194,8 @@ static void service_start(HWND window) {
         snprintf(plan.host_ipv4,sizeof(plan.host_ipv4),"%s",status.host_ipv4);
         if (!launch_available || !prepare_game(&plan)) {
             SudekiMpLobbyLoadAck(session,p->revision,p->generation,SUDEKIMP_LOBBY_ACK_FAILED,0);
-            strcpy(message,p->destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME?
-                "Could not prepare the selected save. Every player needs a matching local copy.":
-                "Could not prepare Test Room. See the game log for details.");
+            prepare_failure_text(p->destination,
+                "Could not prepare the selected save. Every player needs a matching local copy.");
             return;
         }
         SudekiMpLogFormat("title_lobby event=in_place_prepare revision=%lu seat=%u members=%u\r\n",

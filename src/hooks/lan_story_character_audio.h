@@ -19,4 +19,20 @@ BOOL SudekiMpStoryCharacterAudioBindEffect(const SudekiMpLanStoryNativeRoster *r
  * a 2D spot cue (an interior door sound) once through the spot emitter's
  * guarded native play, as CSound::PlayCue does. TRUE when a cue started. */
 BOOL SudekiMpStoryCharacterAudioPlaySpot(const char *cue);
+/* Client shot audio (ranged weapons and Kurian Shooter missiles): the
+ * planner's actions played on module-owned emitter records with the same
+ * native routines CMissile uses (EmitterBankSet, EmitterPlay, attachment
+ * position/release). Native thread, inside the client Present callback.
+ * Failure means silence; nothing is ever force-stopped without a proof. */
+#include "network/lan_story_shot_audio.h"
+BOOL SudekiMpStoryShotAudioPresent(const SudekiMpLanStoryNativeRoster *roster,
+    const SudekiMpStoryShotAudioInput *input,SudekiMpStoryCharacterAudioExact exact,void *context);
+/* A record needs a service pass (the Present callback has not run for 250 ms). */
+BOOL SudekiMpStoryShotAudioNeedsService(uint32_t now);
+/* Stop travel cues, let fire cues finish, release finished records. */
+BOOL SudekiMpStoryShotAudioDrain(SudekiMpStoryCharacterAudioExact exact,void *context);
+/* Stop everything and release; TRUE only when no retryable record remains. */
+BOOL SudekiMpStoryShotAudioStop(SudekiMpStoryCharacterAudioExact exact,void *context);
+/* Any record that still needs cleanup (quarantined records excluded). */
+BOOL SudekiMpStoryShotAudioRetains(void);
 #endif

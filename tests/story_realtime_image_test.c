@@ -23,8 +23,24 @@ static BOOL test_inline(SudekiMpInlineHook *p,uint8_t *at,const uint8_t *a,size_
     return !fail() && SudekiMpInstallInlineHook(p,at,a,n,b);
 }
 void SudekiMpLogWrite(const char *text) { (void)text; }
+void SudekiMpLogFormat(const char *format,...) { (void)format; }
 static uint8_t *mapped;
 static size_t image_size;
+/* Map the image where byte 2 of the relocated camera operand (base+0x2c4018)
+ * equals byte 2 of &camera_threshold: the live-mp70 collision that a byte
+ * patch refuses (error 87, 2026-10-18). The low 16 bits of the two never
+ * collide (page offset 0x4018 against the DLL constant's page offset). */
+static BOOL collision_mapped;
+static uint8_t *reserve_colliding(size_t size) {
+    uint32_t want=(uint32_t)(uintptr_t)&camera_threshold;
+    uint32_t byte2=((want>>16)-0x2cu)&0xffu;
+    for(uint32_t high=0x10u;high<0x70u;high+=0x08u) {
+        uint8_t *b=VirtualAlloc((void *)(uintptr_t)((high<<24)|(byte2<<16)),size,
+            MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+        if(b) { collision_mapped=TRUE; return b; }
+    }
+    return NULL;
+}
 static unsigned source_references;
 /* Independent relocation census of the pooled alternate-speed constant.
  * All but camera47B668 are CGameSpeed selectors or its two init/reset reads.
@@ -50,7 +66,8 @@ static uint8_t *map_image(const wchar_t *path) {
     uint8_t *raw=malloc(size); assert(raw && ReadFile(f,raw,size,&got,NULL) && got==size); CloseHandle(f);
     IMAGE_DOS_HEADER *dos=(void *)raw; IMAGE_NT_HEADERS32 *nt=(void *)(raw+dos->e_lfanew);
     image_size=nt->OptionalHeader.SizeOfImage;
-    uint8_t *b=VirtualAlloc(NULL,image_size,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+    uint8_t *b=reserve_colliding(image_size);
+    if(!b) b=VirtualAlloc(NULL,image_size,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
     assert(b); memcpy(b,raw,nt->OptionalHeader.SizeOfHeaders);
     IMAGE_SECTION_HEADER *sections=IMAGE_FIRST_SECTION(nt);
     for(unsigned i=0;i<nt->FileHeader.NumberOfSections;++i) {
@@ -86,16 +103,37 @@ static uint8_t *map_image(const wchar_t *path) {
     assert(source_references==sizeof(source_reads)/sizeof(*source_reads));
     free(raw); return b;
 }
+static unsigned camera_mask(void) {
+    return pointer_patch_mask((uint32_t)(uintptr_t)(mapped+0x2c4018),(uint32_t)(uintptr_t)&camera_threshold);
+}
+/* The menu byte, three inline hooks, the differing camera operand bytes and
+ * the four alternate-constant bytes. */
+static unsigned patch_steps(void) { return 8u+(unsigned)__builtin_popcount(camera_mask()); }
 static void install(void) {
     step=fail_step=0; assert(SudekiMpLanStoryRealtimeInstall((HMODULE)mapped));
-    assert(step==12 && SudekiMpLanStoryRealtimeExact((HMODULE)mapped));
+    assert(step==patch_steps() && SudekiMpLanStoryRealtimeExact((HMODULE)mapped));
+}
+static void mask_tests(void) {
+    /* Live bases: ab548725 at 0x77be0000 (all four bytes differ) and
+     * 61ebb4b2 at 0x77bb0000 (byte 2 collides: the 2026-10-18 error 87). */
+    assert(pointer_patch_mask(0x7ae94018u,0x77ebf350u)==0xfu);
+    assert(pointer_patch_mask(0x7ae94018u,0x77e948d0u)==0xbu);
+    assert(pointer_patch_mask(0x7ae94018u,0x7ae94018u)==0u);
+    assert(pointer_patch_mask(0x00000000u,0x01000000u)==0x8u);
+    unsigned mask=camera_mask();
+    assert(mask && mask<=0xfu);
+    if(collision_mapped) assert(!(mask&4u));
+    install();
+    assert(camera_unchanged==(~mask&0xfu) && *(const float **)(mapped+0x7b66a)==&camera_threshold);
+    for(unsigned i=0;i<4u;++i) assert(camera_patches[i].installed==(BOOL)((mask>>i)&1u));
+    assert(SudekiMpLanStoryRealtimeUninstall() && !retains() && !camera_unchanged);
 }
 static DWORD WINAPI foreign_thread(void *unused) {
     (void)unused; assert(!SudekiMpLanStoryRealtimeUninstall() && retains()); return 0;
 }
 static void lifecycle_tests(void) {
     uint8_t *original=malloc(image_size); assert(original); memcpy(original,mapped,image_size);
-    for(unsigned i=1;i<=12;++i) {
+    for(unsigned i=1;i<=patch_steps();++i) {
         step=0; fail_step=i;
         assert(!SudekiMpLanStoryRealtimeInstall((HMODULE)mapped) && GetLastError()==ERROR_WRITE_FAULT);
         assert(!retains() && !installed && !memcmp(original,mapped,image_size));
@@ -110,10 +148,12 @@ static void lifecycle_tests(void) {
     install(); assert(!SudekiMpLanStoryRealtimeInstall((HMODULE)mapped));
     HANDLE worker=CreateThread(NULL,0,foreign_thread,NULL,0,NULL); assert(worker);
     assert(WaitForSingleObject(worker,5000)==WAIT_OBJECT_0); CloseHandle(worker);
-    uint8_t owned=mapped[0x7b66b]; mapped[0x7b66b]^=1;
+    /* Another writer took a patched camera operand byte: nothing restores. */
+    unsigned taken=camera_mask()&2u?1u:(unsigned)__builtin_ctz(camera_mask());
+    uint8_t owned=mapped[0x7b66a+taken]; mapped[0x7b66a+taken]^=1;
     assert(!SudekiMpLanStoryRealtimeUninstall() && retains() && normal_hook.installed);
-    assert(camera_patches[1].installed && !SudekiMpLanStoryRealtimeExact((HMODULE)mapped));
-    mapped[0x7b66b]=owned;
+    assert(camera_patches[taken].installed && !SudekiMpLanStoryRealtimeExact((HMODULE)mapped));
+    mapped[0x7b66a+taken]=owned;
     assert(SudekiMpLanStoryRealtimeUninstall() && !retains() && !memcmp(original,mapped,image_size));
     free(original);
 }
@@ -155,7 +195,8 @@ static void setter_tests(void) {
 int main(int argc,char **argv) {
     assert(argc==2); wchar_t path[1024];
     assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,path,1024)); mapped=map_image(path);
-    lifecycle_tests(); setter_tests(); VirtualFree(mapped,0,MEM_RELEASE);
-    printf("story realtime exact-image policy, %u-source audit, native leaf ABI and rollback tests passed (no gameplay)\n",source_references);
+    mask_tests(); lifecycle_tests(); setter_tests(); VirtualFree(mapped,0,MEM_RELEASE);
+    printf("story realtime exact-image policy, %u-source audit, camera operand byte collision (%s), native leaf ABI and rollback tests passed (no gameplay)\n",
+        source_references,collision_mapped?"mapped at a colliding base":"no colliding base free");
     return 0;
 }

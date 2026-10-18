@@ -564,6 +564,12 @@ static BOOL audio_present_exact(void *context) {
 static BOOL audio_cleanup_exact(void *context) {
     return SudekiMpLanStoryClientCleanupRosterExact(context);
 }
+/* Shot audio records waiting for a Present that is not coming (#31/#57). */
+static BOOL drain_shot_audio(const SudekiMpLanStoryNativeRoster *roster,
+    const SudekiMpLanStoryScene *scene,void *unused) {
+    (void)scene; (void)unused;
+    return SudekiMpStoryShotAudioDrain(audio_present_exact,(void *)roster);
+}
 static BOOL stop_stale_audio(const SudekiMpLanStoryNativeRoster *roster,
     const SudekiMpLanStoryScene *scene,void *unused) {
     (void)scene; (void)unused;
@@ -793,6 +799,31 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
                 audio.epoch==frame->party->epoch && audio.revision==frame->party->revision)
                 (void)SudekiMpStoryCharacterAudioPresent(roster,&audio,audio_present_exact,(void *)roster);
             else (void)SudekiMpStoryCharacterAudioStop(c,audio_present_exact,(void *)roster);
+        }
+        if(frame->connection) {
+            /* Ranged shot cues (party weapons, Kurian Shooter missiles): this
+             * game plays them itself, positionally, on its own emitters and
+             * from its own data (#31/#57; owner 2026-10-18). A shot is this
+             * game's own only once it positively controls that character. */
+            SudekiMpStoryVfx shot_vfx; uint32_t shot_now=GetTickCount();
+            BOOL vfx_fresh=SudekiMpLanPartyGetStoryVfx(session,frame->connection,shot_now,&shot_vfx) &&
+                shot_vfx.epoch==frame->party->epoch && shot_vfx.revision==frame->party->revision;
+            unsigned own=session?SudekiMpLanPartyLocalCharacter(session):4u;
+            /* The newest received journal (as the muzzle projection uses), not
+             * the interpolated sample: that carries the older bracket's journal,
+             * lags the flash, and can step back after a timeline reset. */
+            const SudekiMpLanStoryFrame *shot_journal=frame->party;
+            if(history_count && presentation_fresh(shot_now,history_receipts[history_count-1u]) &&
+                history_lease.token==frame->connection->token &&
+                history_lease.generation==frame->connection->generation &&
+                history[history_count-1u].epoch==frame->party->epoch &&
+                history[history_count-1u].revision==frame->party->revision)
+                shot_journal=&history[history_count-1u];
+            SudekiMpStoryShotAudioInput shot_input={.now=shot_now,
+                .namespace_token=frame->connection->token^((uint64_t)frame->connection->generation<<40),
+                .local_character=(own<4u && client_local_selected && roster->leader_character==own)?own:4u,
+                .available_mask=roster->available_mask,.journal=shot_journal,.vfx=vfx_fresh?&shot_vfx:NULL};
+            (void)SudekiMpStoryShotAudioPresent(roster,&shot_input,audio_present_exact,(void *)roster);
         }
         SudekiMpLanStoryAreaFadeApply(roster);
         if(aim_pose_attempted) SudekiMpLanAimActors(roster->actors[3],NULL);
@@ -1108,6 +1139,11 @@ static BOOL retire_client(void) {
         SudekiMpLanStoryNativeRoster roster;SudekiMpLanStoryScene scene;
         if(!SudekiMpLanStoryClientCleanupRoster(&roster,&scene))return FALSE;
         for(unsigned c=0;c<4;++c)if(!SudekiMpStoryCharacterAudioStop(c,audio_cleanup_exact,&roster))return FALSE;
+    }
+    if(SudekiMpStoryShotAudioRetains()) {
+        SudekiMpLanStoryNativeRoster roster;SudekiMpLanStoryScene scene;
+        if(!SudekiMpLanStoryClientCleanupRoster(&roster,&scene) ||
+            !SudekiMpStoryShotAudioStop(audio_cleanup_exact,&roster))return FALSE;
     }
     if(SudekiMpLanStoryCinematicAudioRetains()) {
         SudekiMpLanStoryNativeRoster roster; SudekiMpLanStoryScene scene;
@@ -2210,6 +2246,7 @@ static void service_client_recruitment(void) {
         recruitment.actor_generation,recruitment.observed_tick};
     if(SudekiMpStoryCharacterAudioRetains())
         for(unsigned c=0;c<4;++c)if(!SudekiMpStoryCharacterAudioStop(c,audio_cleanup_exact,&roster))return;
+    if(SudekiMpStoryShotAudioRetains() && !SudekiMpStoryShotAudioStop(audio_cleanup_exact,&roster)) return;
     if(SudekiMpLanStoryCinematicAudioRetains() &&
         !SudekiMpLanStoryCinematicAudioStop(audio_cleanup_exact,&roster)) return;
     client_recruit=recruitment;
@@ -2828,6 +2865,8 @@ static void menu_frame(void) {
             if(contained && (SudekiMpLanStoryCinematicAudioRetains() || SudekiMpStoryCharacterAudioRetains()) &&
                 (!visible_dialogue_valid || !presentation_fresh(GetTickCount(),visible_dialogue_receipt)))
                 (void)SudekiMpLanStoryClientPresent(stop_stale_audio,NULL);
+            if(contained && SudekiMpStoryShotAudioNeedsService(GetTickCount()))
+                (void)SudekiMpLanStoryClientPresent(drain_shot_audio,NULL);
         }
         presentation_attempted=FALSE;
     }
@@ -3284,6 +3323,7 @@ static void service(void *controller,void *data,
             if(native.phase==SUDEKIMP_LAN_STORY_READY && load_finished() &&
                 SudekiMpLanStoryObserverRoster(controller,w,&native,&start_roster))
                 { SudekiMpLanStoryTestStartService(&start_roster); SudekiMpLanStoryTestStartResearchService(&start_roster);
+                  SudekiMpLanStorySpawnTestAllyService();
                   uint8_t remote_characters=0,input_fresh=0; uint32_t at=GetTickCount();
                   for(unsigned p=1;p<4u;++p) {
                       SudekiMpLanPartyPeerStatus peer={0}; unsigned c=SudekiMpLanPartyPlayerCharacter(session,p);
@@ -3872,7 +3912,8 @@ if(!SudekiMpLanStorySpawnTraceUninstall()) return retain_module();
     local_control_attempted=FALSE;
     SudekiMpLanStoryXpReset();
     SudekiMpStoryCharacterAudioClose();
-    if(SudekiMpStoryCharacterAudioRetains() || !SudekiMpLanStoryCinematicAudioReset()) return retain_module();
+    if(SudekiMpStoryCharacterAudioRetains() || SudekiMpStoryShotAudioRetains() ||
+        !SudekiMpLanStoryCinematicAudioReset()) return retain_module();
     if(exited && recruit_attempted && !SudekiMpLanStoryRecruitNativeExitReturned()) return retain_module();
     if(recruit_attempted && !SudekiMpLanStoryRecruitUninstall()) return retain_module();
     recruit_attempted=FALSE;

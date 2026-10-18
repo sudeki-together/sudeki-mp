@@ -1,4 +1,5 @@
 #include "hooks/lan_story_muzzle.h"
+#include "hooks/story_aimed_flash.h"
 #include <math.h>
 #include <string.h>
 
@@ -101,6 +102,10 @@ BOOL SudekiMpStoryMuzzleObserve(HMODULE image,void *actor,uint8_t type,SudekiMpS
 static unsigned visual_character(const SudekiMpLanArenaSpiritVfxSnapshot *v,BOOL *flash) {
     if(v->skill_sequence) return 4u;
     *flash=FALSE;
+    /* Flashes without locator follow stay where they were fired (native
+     * 0x4C7D20): anchored once at this client's tip like a bolt, not tracked. */
+    if(SudekiMpAimedFlashKind(v->owner_actor_type,v->kind,v->skill_sequence))
+        return v->owner_actor_type==1u?3u:1u;
     if(v->owner_actor_type==1u) {
         if(v->kind>=35u && v->kind<=39u) {*flash=TRUE;return 3u;}
         if(v->kind>=43u && v->kind<=51u) return 3u;

@@ -7,7 +7,7 @@
  * to create objects, execute scripts, select assets or apply damage. Native
  * playback must resolve each identity to an already loaded exact NPC or
  * canonical party owner, or an already loaded generic scenery entity. */
-#define SUDEKIMP_LAN_STORY_WORLD_VERSION 11u
+#define SUDEKIMP_LAN_STORY_WORLD_VERSION 12u
 #define SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS 64u
 #define SUDEKIMP_LAN_STORY_WORLD_CHUNK_ACTORS 8u
 #define SUDEKIMP_LAN_STORY_WORLD_MAX_CHUNKS 8u
@@ -19,6 +19,9 @@
 #define SUDEKIMP_LAN_STORY_WORLD_NPC_KIND 0x0f9bu
 /* Group-spawned monster (#54); identifier is the portable spawn identity. */
 #define SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND 0x0f99u
+/* Group-spawned ally (E2, AllyEntity: the castle-road gate guards); same
+ * portable spawn identity and HP/visibility/death fields as a monster. */
+#define SUDEKIMP_LAN_STORY_WORLD_ALLY_KIND 0x0f82u
 #define SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND 0x0f8fu
 /* DoorEntity (#67): native door model pose follows the host like scenery. */
 #define SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND 0x0f8cu
@@ -57,7 +60,8 @@ typedef struct SudekiMpLanStoryWorldActor {
     uint16_t clip_occurrence[5];
     uint8_t state[5];
     float rate[5], time[5], blend[4];
-    /* Monsters only (#54): host native HitPoints (CStats+0x2C); 0 otherwise. */
+    /* Monsters and allies only (#54, E2): host native HitPoints (CStats+0x2C);
+     * 0 otherwise. */
     float hit_points;
     /* Valid only with SUDEKIMP_LAN_STORY_WORLD_ALPHA; 0 otherwise. */
     uint8_t alpha;

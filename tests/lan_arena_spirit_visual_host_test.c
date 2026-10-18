@@ -1,3 +1,4 @@
+#include "hooks/story_aimed_flash.h"
 #include "hooks/lan_arena_spirit_visual_host.h"
 #include "hooks/lan_party_projectile_lifetime.h"
 #include "cleanroom/engine.h"
@@ -337,6 +338,48 @@ static void matrix_tests(void) {
     compose(quaternions[0],scale,position,matrix);
     matrix[0]=0;
     CHECK(!SudekiMpSpiritVisualDecomposeMatrix(matrix,&value));
+}
+
+/* Weapon flashes placed without locator follow (native 0x4C7D20): the
+ * sheared aimed basis is not a rotation+scale pose; the host publishes its
+ * orthonormal frame and row lengths and the client rebuild gives back the
+ * exact native matrix. */
+static void native_aimed(const float d_in[3],const float pos[3],float m[16]) {
+    float n=sqrtf(d_in[0]*d_in[0]+d_in[1]*d_in[1]+d_in[2]*d_in[2]),d[3]={d_in[0]/n,d_in[1]/n,d_in[2]/n};
+    memset(m,0,sizeof(float)*16u);
+    m[0]=d[2]; m[2]=-d[0]; m[5]=1.0f; m[8]=d[0]; m[9]=d[1]; m[10]=d[2];
+    m[12]=pos[0]; m[13]=pos[1]; m[14]=pos[2]; m[15]=1.0f;
+}
+static void aimed_flash_tests(void) {
+    static const float aims[][3]={{0.3f,-0.4f,0.8f},{-0.9f,0.2f,0.1f},{0.0f,-0.5f,-1.0f},{0.7f,0.0f,0.7f},{0.05f,0.9f,-0.1f}};
+    const float pos[3]={-118.7f,7.7f,-67.0f};
+    SudekiMpLanArenaSpiritVfxSnapshot value={0};
+    float native[16],frame[16],rebuilt[16];
+    for(unsigned i=0;i<sizeof(aims)/sizeof(aims[0]);++i) {
+        native_aimed(aims[i],pos,native);
+        CHECK(SudekiMpSpiritVisualDecomposeMatrix(native,&value)==(aims[i][1]==0.0f)); /* sheared unless level */
+        CHECK(SudekiMpAimedFlashOrthonormalize(native,frame));
+        CHECK(SudekiMpSpiritVisualDecomposeMatrix(frame,&value));
+        compose(value.rotation_xyzw,value.scale,value.position,rebuilt);
+        SudekiMpAimedFlashRebuild(rebuilt);
+        for(unsigned j=0;j<16u;++j) CHECK(fabsf(native[j]-rebuilt[j])<0.0002f);
+    }
+    /* Any other shear still has no pose. */
+    native_aimed(aims[0],pos,native); native[6]=0.2f;               /* Y not straight up */
+    CHECK(!SudekiMpAimedFlashOrthonormalize(native,frame));
+    native_aimed(aims[0],pos,native); native[1]=0.3f;               /* X off the horizontal */
+    CHECK(!SudekiMpAimedFlashOrthonormalize(native,frame));
+    native_aimed(aims[0],pos,native); native[0]=-native[0]; native[2]=-native[2]; /* mirrored X */
+    CHECK(!SudekiMpAimedFlashOrthonormalize(native,frame));
+    { const float up[3]={0.01f,1.0f,0.01f}; native_aimed(up,pos,native); /* near-vertical aim */
+      CHECK(!SudekiMpAimedFlashOrthonormalize(native,frame)); }
+    native_aimed(aims[0],pos,native); native[13]=NAN; CHECK(!SudekiMpAimedFlashOrthonormalize(native,frame));
+    /* Only the four weapon flashes, ordinary fire, the right owner. */
+    CHECK(SudekiMpAimedFlashKind(0x01u,36u,0u) && SudekiMpAimedFlashKind(0x01u,38u,0u));
+    CHECK(SudekiMpAimedFlashKind(0x0eu,56u,0u) && SudekiMpAimedFlashKind(0x0eu,57u,0u));
+    CHECK(!SudekiMpAimedFlashKind(0x01u,35u,0u) && !SudekiMpAimedFlashKind(0x01u,37u,0u) &&
+        !SudekiMpAimedFlashKind(0x0eu,36u,0u) && !SudekiMpAimedFlashKind(0x01u,56u,0u) &&
+        !SudekiMpAimedFlashKind(0x01u,36u,7u) && !SudekiMpAimedFlashKind(0x00u,36u,0u));
 }
 
 /* Mapped exact-image fixture, never calls loader entry or imports. Only the
@@ -911,6 +954,7 @@ int main(int argc,char **argv) {
         CHECK(SudekiMpSpiritVisualKindForResource(0x8e21830fu)==SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP);
     }
     matrix_tests();
+    aimed_flash_tests();
     if(argc>1) image_tests(argv[1]);
     if(failures) { fprintf(stderr,"%u failures\n",failures); return 1; }
     puts("LanArenaSpiritVisualHostTest: PASS");

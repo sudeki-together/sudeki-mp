@@ -261,11 +261,50 @@ static void flush_cases(void) {
     assert(calls==1 && damage_restore.lifted && !feedback[0].entity);
     protect(entity,PAGE_READWRITE); assert(!SudekiMpLanStoryWorldFlushMonsterDamage()); assert(!damage_restore.lifted && calls==1);
     fixture(); ++client_bound[0].previous.generation; assert(!SudekiMpLanStoryWorldFlushMonsterDamage()); assert(!calls);
+    /* E2: a replicated ally's host HP drop replays like a monster's. */
+    fixture(); *(void **)entity=image+0x2d55d4; client_bound[0].previous.kind=SUDEKIMP_LAN_STORY_WORLD_ALLY_KIND;
+    assert(SudekiMpLanStoryWorldFlushMonsterDamage() && calls==1);
+    fixture(); client_bound[0].previous.kind=SUDEKIMP_LAN_STORY_WORLD_NPC_KIND;
+    assert(!SudekiMpLanStoryWorldFlushMonsterDamage() && !calls);
 }
 #endif
+/* Host HP proof (#54 D1, E2): a failed or non-finite read never becomes 0. */
+static void combatant_hp(void) {
+    float out=-1.0f;
+    assert(SudekiMpStoryCombatantHp(TRUE,250.0f,TRUE,300.0f,&out)==SUDEKIMP_COMBATANT_HP_PROVEN && out==250.0f);
+    assert(SudekiMpStoryCombatantHp(TRUE,0.0f,TRUE,300.0f,&out)==SUDEKIMP_COMBATANT_HP_PROVEN && out==0.0f);
+    assert(SudekiMpStoryCombatantHp(TRUE,-12.0f,TRUE,300.0f,&out)==SUDEKIMP_COMBATANT_HP_PROVEN && out==0.0f); /* overkill */
+    assert(SudekiMpStoryCombatantHp(FALSE,0.0f,TRUE,300.0f,&out)==SUDEKIMP_COMBATANT_HP_HELD && out==300.0f);
+    assert(SudekiMpStoryCombatantHp(TRUE,NAN,TRUE,300.0f,&out)==SUDEKIMP_COMBATANT_HP_HELD && out==300.0f);
+    assert(SudekiMpStoryCombatantHp(TRUE,INFINITY,TRUE,300.0f,&out)==SUDEKIMP_COMBATANT_HP_HELD && out==300.0f);
+    assert(SudekiMpStoryCombatantHp(TRUE,200000000.0f,TRUE,300.0f,&out)==SUDEKIMP_COMBATANT_HP_HELD && out==300.0f);
+    assert(SudekiMpStoryCombatantHp(FALSE,0.0f,FALSE,0.0f,&out)==SUDEKIMP_COMBATANT_HP_UNKNOWN && out==0.0f);
+    assert(SudekiMpStoryCombatantHp(TRUE,NAN,FALSE,300.0f,&out)==SUDEKIMP_COMBATANT_HP_UNKNOWN);
+    assert(SudekiMpStoryCombatantHp(FALSE,0.0f,TRUE,NAN,&out)==SUDEKIMP_COMBATANT_HP_UNKNOWN);
+    assert(SudekiMpStoryCombatantHp(FALSE,0.0f,TRUE,-1.0f,&out)==SUDEKIMP_COMBATANT_HP_UNKNOWN);
+    puts("Combatant HP proof: failed or non-finite reads hold the last published HP or omit, never 0 PASS");
+    /* Test aid (TestAllyHealth): one hit to the fraction, never lethal. */
+    assert(SudekiMpStoryTestAllyDamage(450.0f,0.1f)==405.0f);
+    { float big=SudekiMpStoryTestAllyDamage(4100.0f,0.0002f); /* binary16 rounding keeps HP */
+      assert(big>0.0f && big<=4100.0f-8.0f); }
+    assert(SudekiMpStoryTestAllyDamage(450.0f,0.001f)==449.0f); /* at least 1 HP left */
+    assert(SudekiMpStoryTestAllyDamage(1.0f,0.5f)==0.0f && SudekiMpStoryTestAllyDamage(450.0f,0.0f)==0.0f &&
+        SudekiMpStoryTestAllyDamage(450.0f,1.0f)==0.0f && SudekiMpStoryTestAllyDamage(NAN,0.5f)==0.0f &&
+        SudekiMpStoryTestAllyDamage(450.0f,NAN)==0.0f);
+    { uint8_t arb[0x64]={0}; /* the native gate predicate, checked against the image bytes */
+      *(uint32_t *)(arb+0x50)=0x1002; arb[0x60]=2; assert(SudekiMpStoryDirectDamageAdmits(image,arb,checked_memory));
+      *(uint32_t *)(arb+0x50)=0x80802; assert(!SudekiMpStoryDirectDamageAdmits(image,arb,checked_memory)); /* idle */
+      *(uint32_t *)(arb+0x50)=0x1000; assert(!SudekiMpStoryDirectDamageAdmits(image,arb,checked_memory));
+      *(uint32_t *)(arb+0x50)=0x4002; assert(!SudekiMpStoryDirectDamageAdmits(image,arb,checked_memory)); /* dead */
+      *(uint32_t *)(arb+0x50)=0x1002; *(uint32_t *)(arb+0x58)=3; assert(!SudekiMpStoryDirectDamageAdmits(image,arb,checked_memory));
+      *(uint32_t *)(arb+0x58)=0; arb[0x60]=0; assert(!SudekiMpStoryDirectDamageAdmits(image,arb,checked_memory));
+      arb[0x60]=2; image[0xd3b46]^=1; assert(!SudekiMpStoryDirectDamageAdmits(image,arb,checked_memory)); image[0xd3b46]^=1; }
+    puts("Test ally damage: one nonlethal hit to the configured fraction, native gate predicate PASS");
+}
 int main(int argc,char **argv) {
     assert(argc==2); wchar_t path[1024]; assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,path,1024));
     image=map_image(path);
+    combatant_hp();
     uint8_t **buffers[]={&entity,&arbiter,&combat,&registry,&old_entries,&new_entries};
     for(unsigned i=0;i<sizeof(buffers)/sizeof(buffers[0]);++i) {
         *buffers[i]=VirtualAlloc(NULL,4096,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE); assert(*buffers[i]);
@@ -304,6 +343,11 @@ int main(int argc,char **argv) {
     fixture(); *(void **)(arbiter+0x10)=combat; assert(!SudekiMpStoryDamageCapture(image,&identity,&guard,checked_memory));
     fixture(); ++identity.native_identifier; assert(!SudekiMpStoryDamageCapture(image,&identity,&guard,checked_memory));
     fixture(); protect(arbiter,PAGE_READONLY); assert(!SudekiMpStoryDamageCapture(image,&identity,&guard,checked_memory));
+    /* E2: an ally (AllyEntity) takes the same guarded replay; any other
+     * class (here Ailish's) never does. */
+    fixture(); *(void **)entity=image+0x2d55d4; execute();
+    assert(SudekiMpStoryDamageRestore(image,&guard,TRUE,checked_memory)==SUDEKIMP_DAMAGE_EXACT && !guard.lifted);
+    fixture(); *(void **)entity=image+0x2d555c; assert(!SudekiMpStoryDamageCapture(image,&identity,&guard,checked_memory));
 #ifdef SUDEKIMP_DAMAGE_FLUSH_TEST
     flush_cases();
     puts("StoryMonsterDamageFlushImageTest PASS");

@@ -1537,11 +1537,11 @@ static void test_monster_display_wire(void) {
     uint8_t bytes[SUDEKIMP_LAN_STORY_WORLD_CHUNK_MAX_SIZE]; size_t size=0;
     SudekiMpLanStoryWorldChunk out;
     CHECK(SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
-    CHECK(size==172u && bytes[3]==11u);
+    CHECK(size==172u && bytes[3]==12u);
     CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
     CHECK(out.actors[0].visual_flags==SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE);
     CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size-1u,&out));
-    bytes[3]=10u; CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out)); bytes[3]=11u;
+    bytes[3]=11u; CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out)); bytes[3]=12u;
     bytes[31]=SUDEKIMP_LAN_STORY_WORLD_HIDDEN;
     CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
     for(unsigned style=0;style<=7;++style) {
@@ -1598,6 +1598,20 @@ static void test_monster_display_wire(void) {
     a->kind=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND; a->visual_flags=SUDEKIMP_LAN_STORY_WORLD_ALPHA;
     CHECK(!SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
     a->kind=SUDEKIMP_LAN_STORY_WORLD_CHEST_KIND; a->visual_flags=0; a->alpha=0;
+    /* Ally (E2): a monster's fields (HP, health display, hidden, death style),
+     * never render alpha; this decoder refuses a version-11 chunk. */
+    a->kind=SUDEKIMP_LAN_STORY_WORLD_ALLY_KIND; a->hit_points=250;
+    a->visual_flags=SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE|SUDEKIMP_LAN_STORY_WORLD_DEAD|
+        SUDEKIMP_LAN_STORY_WORLD_HIDDEN|(3u<<SUDEKIMP_LAN_STORY_WORLD_DEATH_SHIFT);
+    CHECK(SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
+    CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out) && out.actors[0].kind==SUDEKIMP_LAN_STORY_WORLD_ALLY_KIND &&
+        out.actors[0].hit_points==250.0f && out.actors[0].visual_flags==a->visual_flags);
+    bytes[3]=11u; CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out)); bytes[3]=12u;
+    a->visual_flags=SUDEKIMP_LAN_STORY_WORLD_ALPHA; a->alpha=0x80u;
+    CHECK(!SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
+    a->visual_flags=0; a->alpha=0; a->hit_points=-1.0f;
+    CHECK(!SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
+    a->kind=SUDEKIMP_LAN_STORY_WORLD_CHEST_KIND; a->hit_points=0;
 }
 
 int main(void) {

@@ -26,6 +26,10 @@ static DWORD native_thread;
 static void *title_owner, *room_world, *room_descriptor;
 static volatile LONG active, running, loaded, callbacks;
 static BOOL requested, dispatched, failed;
+/* Win32 error of the last runtime install refusal (0: the save pair or the
+ * plan was refused instead). The lobby text must not blame the save for a
+ * hook that would not install (error 87 did that on 2026-10-18). */
+static DWORD runtime_failure;
 static BOOL runtime_attempted;
 static BOOL saved_enabled,saved_game,testroom_enabled=TRUE;
 static unsigned story_exit_status;
@@ -217,7 +221,7 @@ static BOOL prepare(const SudekiMpLobbyLaunchPlan *p,const SudekiMpLobbySavedGam
     if (!base || active || !SudekiMpLobbyLaunchPlanValid(p) ||
         (save?!saved_enabled:!testroom_enabled)) return FALSE;
     native_thread=GetCurrentThreadId(); plan=*p; title_owner=room_world=room_descriptor=NULL;
-    saved_game=save!=NULL; runtime_attempted=FALSE;
+    saved_game=save!=NULL; runtime_attempted=FALSE; runtime_failure=0;
     story_exit_status=0;
     requested=dispatched=failed=FALSE; InterlockedExchange(&running,0); InterlockedExchange(&loaded,0);
     InterlockedExchange(&active,1);
@@ -238,14 +242,15 @@ static BOOL prepare(const SudekiMpLobbyLaunchPlan *p,const SudekiMpLobbySavedGam
     }
     runtime_attempted=TRUE;
     if (!(save?SudekiMpInstallLanStoryRuntime((HMODULE)base,&c):SudekiMpInstallLanPartyRuntime((HMODULE)base,&c))) {
-        failed=TRUE;
-        SudekiMpLogFormat("lobby_gameplay event=prepare_failed seat=%u error=%lu\r\n",p->seat,(unsigned long)GetLastError());
+        failed=TRUE; runtime_failure=GetLastError(); if(!runtime_failure) runtime_failure=ERROR_GEN_FAILURE;
+        SudekiMpLogFormat("lobby_gameplay event=prepare_failed seat=%u error=%lu\r\n",p->seat,(unsigned long)runtime_failure);
         return FALSE;
     }
     SudekiMpLogFormat("lobby_gameplay event=prepared seat=%u revision=%lu process=%lu destination=%s\r\n",
         p->seat,(unsigned long)p->revision,(unsigned long)GetCurrentProcessId(),save?"saved_game":"testroom");
     return TRUE;
 }
+DWORD SudekiMpLobbyGameplayRuntimeFailure(void) { return runtime_failure; }
 BOOL SudekiMpLobbyGameplayPrepare(const SudekiMpLobbyLaunchPlan *p) { return prepare(p,NULL); }
 BOOL SudekiMpLobbyGameplayPrepareSaved(const SudekiMpLobbyLaunchPlan *p,const SudekiMpLobbySavedGame *save) {
     return save && prepare(p,save);

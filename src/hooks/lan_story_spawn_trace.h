@@ -21,6 +21,11 @@ BOOL SudekiMpLanStorySpawnIdentity(const void *monster,uint32_t *identity);
  * per leased occurrence. Native death/loot and final removal stay separate. */
 BOOL SudekiMpLanStorySpawnDeathState(const void *monster,BOOL *dead,unsigned *emitted);
 BOOL SudekiMpLanStorySpawnDeathPresent(void *monster,uint32_t identity,unsigned style);
+/* Test aid ([StoryAreas] TestAllyHealth = fraction, 0 < f < 1; host only):
+ * one native hit per spawned ally leaves it at that fraction of its HP, so
+ * enemies can finish it. Default off. Service on the host game thread. */
+void SudekiMpLanStorySpawnSetTestAllyHealth(float fraction);
+void SudekiMpLanStorySpawnTestAllyService(void);
 /* Call use() with a native ResourceName built from name (game thread). */
 BOOL SudekiMpLanStoryWithResourceName(const char *name,unsigned kind,
     void (*use)(void *resource,void *context),void *context);

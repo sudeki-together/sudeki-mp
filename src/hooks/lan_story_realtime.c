@@ -13,6 +13,19 @@ static BOOL installed;
 static DWORD native_thread;
 static SudekiMpInlineHook normal_hook,master_hook,variable_hook;
 static SudekiMpBytePatch menu_patch,alternate_patches[4],camera_patches[4];
+/* Bit i set: operand byte i of the camera reader already equals byte i of
+ * the replacement pointer, so it gets no patch (a byte patch refuses
+ * expected==replacement with ERROR_INVALID_PARAMETER). Which bytes collide
+ * depends on where the loader placed this DLL: a 0x2a000 larger image moved
+ * it three 64K pages and byte 2 collided, failing every saved-story start
+ * with error 87 (live-mp70 host, 2026-10-18). */
+static uint8_t camera_unchanged;
+/* Bit i set: byte i of `native` differs from byte i of `replacement`. Pure. */
+static unsigned pointer_patch_mask(uint32_t native,uint32_t replacement) {
+    unsigned mask=0;
+    for(unsigned i=0;i<4u;++i) if(((native^replacement)>>(8u*i))&0xffu) mask|=1u<<i;
+    return mask;
+}
 /* The compiler-pooled 0.07 constant has one non-speed reader (47B668).
  * Preserve that reader's original threshold. This immutable dependency must
  * outlive any partially restored operand; failed cleanup pins the module. */
@@ -65,13 +78,16 @@ BOOL SudekiMpLanStoryRealtimeExact(HMODULE image) {
             memcmp(hooks[i]->target,hooks[i]->replacement,hooks[i]->length)) return FALSE;
     if(!menu_patch.installed || *menu_patch.target!=0u) return FALSE;
     uintptr_t camera=(uintptr_t)&camera_threshold;
-    for(unsigned i=0;i<4u;++i)
-        if(!alternate_patches[i].installed || *alternate_patches[i].target!=unity[i] ||
-            !camera_patches[i].installed || *camera_patches[i].target!=((uint8_t *)&camera)[i]) return FALSE;
+    for(unsigned i=0;i<4u;++i) {
+        if(!alternate_patches[i].installed || *alternate_patches[i].target!=unity[i]) return FALSE;
+        if(camera_unchanged&(1u<<i)) {
+            if(!bytes(0x7b66au+i,(uint8_t *)&camera+i,1u)) return FALSE;
+        } else if(!camera_patches[i].installed || *camera_patches[i].target!=((uint8_t *)&camera)[i]) return FALSE;
+    }
     return bytes(0x345f70u,unity,4u) && bytes(0x325810u,unity,4u);
 }
 BOOL SudekiMpLanStoryRealtimeUninstall(void) {
-    if(!retains()) { installed=FALSE; return TRUE; }
+    if(!retains()) { installed=FALSE; camera_unchanged=0; return TRUE; }
     if(native_thread!=GetCurrentThreadId()) return pin(ERROR_INVALID_THREAD_ID);
     /* Reverse order; stop on failure so dependencies remain installed until
      * this exact owner can be retried. Never overwrite another adapter. */
@@ -81,7 +97,7 @@ BOOL SudekiMpLanStoryRealtimeUninstall(void) {
         if(!SudekiMpRestoreBytePatch(&camera_patches[i-1u])) return pin(GetLastError());
     if(!SudekiMpRestoreInlineHook(&variable_hook) || !SudekiMpRestoreInlineHook(&master_hook) ||
         !SudekiMpRestoreInlineHook(&normal_hook) || !SudekiMpRestoreBytePatch(&menu_patch)) return pin(GetLastError());
-    installed=FALSE; SetLastError(ERROR_SUCCESS); return TRUE;
+    installed=FALSE; camera_unchanged=0; SetLastError(ERROR_SUCCESS); return TRUE;
 }
 BOOL SudekiMpLanStoryRealtimeInstall(HMODULE image) {
     uint8_t *b=(uint8_t *)image;
@@ -115,14 +131,17 @@ BOOL SudekiMpLanStoryRealtimeInstall(HMODULE image) {
         !SudekiMpInstallInlineHook(&master_hook,base+0x28be90u,master,10u,(const void *)(uintptr_t)master_speed) ||
         !SudekiMpInstallInlineHook(&variable_hook,base+0x2752cu,variable_bytes+28u,6u,(const void *)(uintptr_t)variable_speed)) goto failed;
     uintptr_t camera_source=(uintptr_t)&camera_threshold;
+    unsigned camera_mask=pointer_patch_mask((uint32_t)address,(uint32_t)camera_source);
+    camera_unchanged=(uint8_t)(~camera_mask&0xfu);
     for(unsigned i=0;i<4u;++i)
-        if(!SudekiMpInstallBytePatch(&camera_patches[i],base+0x7b66au+i,
+        if((camera_mask&(1u<<i)) && !SudekiMpInstallBytePatch(&camera_patches[i],base+0x7b66au+i,
             ((uint8_t *)&address)[i],((uint8_t *)&camera_source)[i])) goto failed;
     for(unsigned i=0;i<4u;++i)
         if(!SudekiMpInstallBytePatch(&alternate_patches[i],base+0x2c4018u+i,alternate[i],unity[i])) goto failed;
     installed=TRUE;
     if(!SudekiMpLanStoryRealtimeExact(image)) { SetLastError(ERROR_INVALID_STATE); goto failed; }
-    SudekiMpLogWrite("story_realtime event=installed normal=1 master=1 alternate=1 variable=1 menu_request=0 full_pause=unchanged camera_threshold=unchanged\r\n");
+    SudekiMpLogFormat("story_realtime event=installed normal=1 master=1 alternate=1 variable=1 menu_request=0 full_pause=unchanged camera_threshold=unchanged camera_operand_bytes_patched=%u\r\n",
+        (unsigned)__builtin_popcount(camera_mask));
     SetLastError(ERROR_SUCCESS); return TRUE;
 failed:
     {

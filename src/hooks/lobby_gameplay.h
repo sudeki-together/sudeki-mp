@@ -8,6 +8,9 @@
 BOOL SudekiMpInstallLobbyGameplay(HMODULE);
 BOOL SudekiMpUninstallLobbyGameplay(void);
 BOOL SudekiMpLobbyGameplayPrepare(const SudekiMpLobbyLaunchPlan *);
+/* After a refused prepare: the Win32 error of the runtime install when that
+ * is what failed (the save pair had verified), otherwise 0. */
+DWORD SudekiMpLobbyGameplayRuntimeFailure(void);
 /* Separate same-process story preparation. Launcher IPC stays Test Room-only;
  * the selected native catalog entry is identified by both reviewed hashes. */
 BOOL SudekiMpLobbyGameplayPrepareSaved(const SudekiMpLobbyLaunchPlan *,

@@ -19,6 +19,8 @@
 #include "hooks/lan_arena_runtime.h"
 #include "hooks/lan_party_runtime.h"
 #include "hooks/lan_story_runtime.h"
+#include "hooks/lan_story_spawn_trace.h"
+#include "hooks/background_audio.h"
 #include "hooks/lan_story_menu.h"
 #include "hooks/lan_party_menu_native.h"
 #include "hooks/lan_story_load.h"
@@ -337,6 +339,12 @@ static void configure_research(const wchar_t *path) {
         if(comma) { *comma=0; SudekiMpLanStoryAreaSetResearchTemporary(t_narrow,comma+1); }
     }
 }
+/* [SudekiMP] BackgroundAudio: test convenience; never stops the mod. */
+static BOOL configure_background_audio(HMODULE game_module,const wchar_t *path) {
+    if(read_config_boolean(path,L"SudekiMP",L"BackgroundAudio") && !SudekiMpInstallBackgroundAudio(game_module))
+        SudekiMpLogWrite("background_audio event=unavailable\r\n");
+    return TRUE;
+}
 static void configure_test_start(HMODULE game_module,const wchar_t *path) {
     configure_research(path);
     float leader[3],follower[3];
@@ -349,6 +357,11 @@ static void configure_test_start(HMODULE game_module,const wchar_t *path) {
         if(text[0]) (void)swscanf(text,L"%f",&follower_health);
         SudekiMpLanStoryTestStartSetLeaderHealth(leader_health);
         SudekiMpLanStoryTestStartSetFollowerHealth(follower_health);
+        /* E2 test aid: spawned allies (the gate guards) start lowered. */
+        float ally_health=0.0f;
+        GetPrivateProfileStringW(L"StoryAreas",L"TestAllyHealth",L"",text,32,path);
+        if(text[0]) (void)swscanf(text,L"%f",&ally_health);
+        SudekiMpLanStorySpawnSetTestAllyHealth(ally_health);
     }
     if(!read_config_xyz(path,L"TestStartLeader",leader)) {
         wchar_t text[96];
@@ -500,6 +513,7 @@ static BOOL uninstall_runtime_hooks(void) {
     if (!SudekiMpUninstallLanPartyRuntime()) return FALSE;
     if (!SudekiMpUninstallLobbyInstance()) return FALSE;
     if (!SudekiMpWindowTitleUninstall()) return FALSE;
+    if (!SudekiMpUninstallBackgroundAudio()) return FALSE;
     if (!SudekiMpSharedReadFilesUninstall()) return FALSE;
     if (!SudekiMpProfileFolderUninstall()) return FALSE;
     if (!SudekiMpUninstallLobbyGameplay()) return FALSE;
@@ -1222,6 +1236,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             !SudekiMpInstallControlSeparation(game_module,0,FALSE,FALSE,FALSE,0,
                 FALSE,0,FALSE,NULL,FALSE,FALSE,FALSE,0) ||
             !SudekiMpInstallLanArenaWindowPolicy(game_module) ||
+            !configure_background_audio(game_module,config_path) ||
             /* Optional: skip only the three publisher/logo startup movies. */
             (read_config_boolean(config_path,L"SudekiMP",L"SkipStartupMovies") &&
                 (SudekiMpLanArenaStartupMovieSkipIntroPoem(TRUE),
@@ -1343,6 +1358,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 !SudekiMpInstallControlSeparation(game_module,0,FALSE,FALSE,FALSE,0,
                     FALSE,0,FALSE,NULL,FALSE,FALSE,FALSE,0) ||
                 !SudekiMpInstallLanArenaWindowPolicy(game_module) ||
+                !configure_background_audio(game_module,config_path) ||
                 (SudekiMpLanStoryRuntimeSetClientNativeCamera(
                     !read_config_boolean(config_path,L"StoryAreas",L"ClientMathCamera")),FALSE) ||
                 !SudekiMpInstallLanStoryRuntime(game_module,&party)) {
@@ -1362,6 +1378,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 FALSE,0,FALSE,NULL,FALSE,FALSE,FALSE,0) ||
             !SudekiMpInstallLanArenaStartupMovieSkip(game_module) ||
             !SudekiMpInstallLanArenaWindowPolicy(game_module) ||
+            !configure_background_audio(game_module,config_path) ||
             !SudekiMpInstallLanPartyRuntime(game_module,&party) ||
             (lobby_launch && !SudekiMpInstallLobbyInstance(game_module))) {
             DWORD error=GetLastError();
@@ -3364,6 +3381,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             (skip_startup_movies &&
              !SudekiMpInstallLanArenaStartupMovieSkip(game_module)) ||
             !SudekiMpInstallLanArenaWindowPolicy(game_module) ||
+            !configure_background_audio(game_module,config_path) ||
             !SudekiMpInstallLanArenaRuntime(game_module, &lan_arena_config) ||
             !SudekiMpInstallLanArenaPausePanel(game_module)) {
             DWORD lan_error = GetLastError();
