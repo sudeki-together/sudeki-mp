@@ -27,7 +27,21 @@ int main(void) {
     /* Weapon families for the equip request. */
     assert(SudekiMpStoryWeaponItemForCharacter(2,0) && SudekiMpStoryWeaponItemForCharacter(2,3) && SudekiMpStoryWeaponItemForCharacter(2,11));
     assert(!SudekiMpStoryWeaponItemForCharacter(2,12) && !SudekiMpStoryWeaponItemForCharacter(3,11));
-    assert(SudekiMpStoryWeaponItemForCharacter(3,12) && SudekiMpStoryWeaponItemForCharacter(0,24) && SudekiMpStoryWeaponItemForCharacter(1,47));
-    assert(!SudekiMpStoryWeaponItemForCharacter(1,48) && !SudekiMpStoryWeaponItemForCharacter(4,0));
+    assert(SudekiMpStoryWeaponItemForCharacter(3,12) && SudekiMpStoryWeaponItemForCharacter(3,23));
+    /* Buki 36..47, Elco 24..35: Buki's own native Weapons page (2026-10-18). */
+    assert(SudekiMpStoryWeaponItemForCharacter(0,36) && SudekiMpStoryWeaponItemForCharacter(0,42) && SudekiMpStoryWeaponItemForCharacter(0,47));
+    assert(!SudekiMpStoryWeaponItemForCharacter(0,24) && !SudekiMpStoryWeaponItemForCharacter(0,35));
+    assert(SudekiMpStoryWeaponItemForCharacter(1,24) && SudekiMpStoryWeaponItemForCharacter(1,35));
+    assert(!SudekiMpStoryWeaponItemForCharacter(1,36) && !SudekiMpStoryWeaponItemForCharacter(1,47));
+    assert(!SudekiMpStoryWeaponItemForCharacter(0,48) && !SudekiMpStoryWeaponItemForCharacter(4,0));
+    /* Categories follow the portrait order (0x43F430 + 4), not the id blocks. */
+    assert(SudekiMpStoryWeaponCategoryForCharacter(2)==4u && SudekiMpStoryWeaponCategoryForCharacter(3)==5u);
+    assert(SudekiMpStoryWeaponCategoryForCharacter(0)==6u && SudekiMpStoryWeaponCategoryForCharacter(1)==7u);
+    assert(!SudekiMpStoryWeaponCategoryForCharacter(4));
+    /* Combat: weapons and items in and out of combat, armour only out of it. */
+    assert(SudekiMpStoryActionAllowedInCombat(SUDEKIMP_STORY_ACTION_EQUIP_WEAPON));
+    assert(SudekiMpStoryActionAllowedInCombat(SUDEKIMP_STORY_ACTION_USE_ITEM));
+    assert(!SudekiMpStoryActionAllowedInCombat(SUDEKIMP_STORY_ACTION_EQUIP_ARMOUR));
+    assert(!SudekiMpStoryActionAllowedInCombat(SUDEKIMP_STORY_ACTION_SKILL));
     return 0;
 }

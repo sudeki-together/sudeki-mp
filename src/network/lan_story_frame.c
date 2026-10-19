@@ -1,5 +1,6 @@
 #include "network/lan_story_frame.h"
 #include "network/lan_party_motion.h"
+#include "network/lan_story_handoff.h"
 #include <math.h>
 #include <string.h>
 
@@ -10,7 +11,6 @@ _Static_assert(SUDEKIMP_LAN_STORY_FRAME_MAX_SIZE+28u<=
 static const uint8_t actor_types[4]={SUDEKIMP_LAN_ARENA_BUKI_TYPE,
     SUDEKIMP_LAN_ARENA_ELCO_TYPE,SUDEKIMP_LAN_ARENA_TAL_TYPE,
     SUDEKIMP_LAN_ARENA_AILISH_TYPE};
-static const uint8_t weapon_first[4]={36u,24u,0u,12u};
 
 static unsigned count_actors(unsigned mask) {
     unsigned count=0;
@@ -136,7 +136,7 @@ BOOL SudekiMpLanStoryActorValid(const SudekiMpLanStoryActor *a,unsigned characte
             (character==0u && !a->weapon_attachment[1])))) return FALSE;
     if(a->weapon_item_plus_one) {
         unsigned item=a->weapon_item_plus_one-1u;
-        if(item<weapon_first[character] || item>=weapon_first[character]+12u) return FALSE;
+        if(!SudekiMpStoryWeaponItemForCharacter(character,item)) return FALSE;
     }
     if(a->armour_item_plus_one && (a->armour_item_plus_one<101u || a->armour_item_plus_one>140u)) return FALSE;
     if(a->use_hint>2u) return FALSE;

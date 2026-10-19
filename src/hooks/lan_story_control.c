@@ -475,8 +475,10 @@ unsigned SudekiMpLanStoryControlEquipWeapon(const SudekiMpControlUpdateDispatchW
         !SudekiMpStoryWeaponItemForCharacter(key->seat,item) ||
         !SudekiMpLanPartyControlStoryExact(w,roster,key)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
     void *actor=roster->actors[key->seat];
-    /* Native rule: no weapon change while fighting, drawing or casting. */
-    if(!ordinary_world(FALSE) || !body_idle(key,actor,w)) return SUDEKIMP_STORY_ACTION_BUSY;
+    /* No weapon change while attacking, drawing or casting; combat itself
+     * is allowed, as in vanilla (owner 2026-10-18). */
+    if(!ordinary_world(SudekiMpStoryActionAllowedInCombat(SUDEKIMP_STORY_ACTION_EQUIP_WEAPON)) ||
+        !body_idle(key,actor,w)) return SUDEKIMP_STORY_ACTION_BUSY;
     SudekiMpWeaponQuickList list;
     if(!SudekiMpGrantCharacterWeaponItem(actor,item) || !SudekiMpDescribeCharacterWeapons(actor,&list) ||
         !SudekiMpLanPartyControlStoryExact(w,roster,key)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
@@ -503,8 +505,9 @@ unsigned SudekiMpLanStoryControlEquipArmour(const SudekiMpControlUpdateDispatchW
         !SudekiMpArmourItemWearable(key->seat,item) ||
         !SudekiMpLanPartyControlStoryExact(w,roster,key)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
     void *actor=roster->actors[key->seat];
-    /* Same native rule as a weapon change: never while fighting or acting. */
-    if(!ordinary_world(FALSE) || !body_idle(key,actor,w)) return SUDEKIMP_STORY_ACTION_BUSY;
+    /* Armour never changes in combat or while acting (owner 2026-10-18). */
+    if(!ordinary_world(SudekiMpStoryActionAllowedInCombat(SUDEKIMP_STORY_ACTION_EQUIP_ARMOUR)) ||
+        !body_idle(key,actor,w)) return SUDEKIMP_STORY_ACTION_BUSY;
     unsigned worn=0;
     if(!SudekiMpCharacterWornArmour(actor,&worn)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
     if(worn==item) return SUDEKIMP_STORY_ACTION_STARTED;
@@ -528,7 +531,9 @@ unsigned SudekiMpLanStoryControlUseItem(const SudekiMpControlUpdateDispatchWitne
     if(!boundary(w,roster) || !key || key->seat>=4u || !(roster->available_mask&(1u<<key->seat)) ||
         item>=999u || !SudekiMpLanPartyControlStoryExact(w,roster,key)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
     void *actor=roster->actors[key->seat];
-    if(!ordinary_world(FALSE) || !body_idle(key,actor,w)) return SUDEKIMP_STORY_ACTION_BUSY;
+    /* Items are used in and out of combat, as in vanilla (owner 2026-10-18). */
+    if(!ordinary_world(SudekiMpStoryActionAllowedInCombat(SUDEKIMP_STORY_ACTION_USE_ITEM)) ||
+        !body_idle(key,actor,w)) return SUDEKIMP_STORY_ACTION_BUSY;
     /* Prefer the native "use item" action (quick-menu path: animation,
      * keyframe apply, item effect through the character's arbiter); the
      * direct Items-page apply remains the fallback (owner, 2026-10-15). */

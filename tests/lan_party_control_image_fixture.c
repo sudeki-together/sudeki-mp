@@ -2,6 +2,7 @@
 #include "hooks/lan_party_host_control.h"
 #include "hooks/lan_party_client_control.h"
 #include "hooks/lan_party_follow.h"
+#include "hooks/lan_story_observer.h"
 #include "network/lan_party_motion.h"
 #include "network/lan_arena_tal_combo_graph.h"
 #include <math.h>
@@ -318,6 +319,51 @@ static void __attribute__((thiscall)) original_stub(void *c, void *d) {
 static BOOL move(const SudekiMpControlUpdateDispatchWitness *w, unsigned int seat) {
     return SudekiMpLanPartyControlMove(w,&leases[seat],actors[seat],0,1,0,1,TRUE);
 }
+/* Story boundary is granted only to this explicit inert fixture. The real
+ * controller wrapper still supplies and validates the borrowed witness. */
+static const SudekiMpLanStoryNativeRoster *story_fixture_roster;
+BOOL SudekiMpStoryEpochFixtureRosterExact(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *r) {
+    return r && r==story_fixture_roster && SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
+}
+static void story_epoch_fixture(const SudekiMpControlUpdateDispatchWitness *w) {
+    SudekiMpLanStoryNativeRoster r={.epoch=10,.revision=1,.available_mask=15,.leader_character=0,
+        .world=group,.descriptor=group,.group=group,.controller=controller};
+    for(unsigned i=0;i<4u;++i) { r.actors[i]=actors[i]; r.ai[i]=ai[i]; }
+    void *old_actor_vt=*(void **)actors[1],*old_controller_vt=*(void **)controller;
+    *(void **)actors[1]=image_base+0x2d66fcu; *(void **)controller=image_base+0x2c9f5cu;
+    story_fixture_roster=&r;
+    CHECK(!SudekiMpLanPartyControlStoryBegin(&escaped,&r));
+    CHECK(SudekiMpLanPartyControlStoryBegin(w,&r));
+    CHECK(SudekiMpLanPartyControlStoryBegin(w,&r));
+    SudekiMpLanPartyLease connection={.token=99,.generation=1,.seat=1},key,next;
+    CHECK(SudekiMpLanPartyControlStoryNextLease(w,&connection,1,&key));
+    ready_now=TRUE;
+    CHECK(SudekiMpLanPartyControlStoryAcquire(w,&r,&key,ready));
+    CHECK(SudekiMpLanPartyControlStoryRetains());
+    r.epoch=11;
+    CHECK(!SudekiMpLanPartyControlStoryBegin(w,&r)); /* held lease blocks new epoch */
+    r.epoch=10;
+    CHECK(SudekiMpLanPartyControlStoryDrain(w,&r,&key,ready));
+    CHECK(!SudekiMpLanPartyControlStoryRetains());
+    r.world=controller; r.descriptor=controller; r.epoch=9;
+    CHECK(!SudekiMpLanPartyControlStoryBegin(w,&r));
+    r.epoch=10; CHECK(!SudekiMpLanPartyControlStoryBegin(w,&r)); /* same epoch, replaced world */
+    r.epoch=11;
+    CHECK(!SudekiMpLanPartyControlStoryBegin(&escaped,&r));
+    uint8_t byte=image_base[0xec350u];
+    image_base[0xec350u]^=1u; CHECK(!SudekiMpLanPartyControlStoryBegin(w,&r));
+    image_base[0xec350u]=byte;
+    CHECK(SudekiMpLanPartyControlStoryBegin(w,&r));
+    CHECK(SudekiMpLanPartyControlStoryNextLease(w,&connection,1,&next));
+    CHECK(next.generation>key.generation);
+    CHECK(SudekiMpLanPartyControlStoryAcquire(w,&r,&next,ready));
+    CHECK(SudekiMpLanPartyControlStoryDrain(w,&r,&next,ready));
+    CHECK(SudekiMpLanPartyControlStoryEnd());
+    CHECK(!SudekiMpLanPartyControlHasLeases());
+    story_fixture_roster=NULL;
+    *(void **)actors[1]=old_actor_vt; *(void **)controller=old_controller_vt;
+}
 static void callback(void *c, void *d,
     const SudekiMpControlUpdateDispatchWitness *w) {
     unsigned int i, before;
@@ -325,6 +371,7 @@ static void callback(void *c, void *d,
     (void)c; (void)d;
     CHECK(SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w));
     escaped = *w;
+    if (phase == 8) { story_epoch_fixture(w); return; }
     if (phase == 7) { follow_fixture(w); return; }
     if (phase == 6) { rebind_fixture(w); return; }
     if (phase == 5) {
@@ -938,6 +985,7 @@ int SudekiMpLanPartyControlImageFixture(uint8_t *base) {
     CHECK(!SudekiMpLanPartyControlHasLeases());
     phase=6; update(controller,NULL);
     phase=7; update(controller,NULL);
+    phase=8; update(controller,NULL);
     CHECK(SudekiMpControlSeparationUnregisterUpdateObserver(&observer_owner));
     CHECK(SudekiMpUninstallControlSeparation());
     memcpy(base+0x27cf0,original,sizeof(original));

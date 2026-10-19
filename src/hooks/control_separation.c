@@ -1,3 +1,4 @@
+#include "hooks/story_control_epoch.h"
 #include "hooks/story_melee_snapshot.h"
 #include "network/lan_story_melee.h"
 #include "hooks/control_separation.h"
@@ -8085,8 +8086,20 @@ static void story_control_forget(unsigned c) {
 }
 BOOL SudekiMpLanPartyControlStoryBegin(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster) {
-    if(InterlockedCompareExchange(&story_native_control.bound,0,0))
+    if(InterlockedCompareExchange(&story_native_control.bound,0,0)) {
+        if(story_control_scope(w,roster)) return TRUE;
+        BOOL empty=!SudekiMpLanPartyControlStoryRetains();
+        for(unsigned c=0;c<4u;++c) if(story_native_control.actor[c].phase!=PARTY_NATIVE_EMPTY) empty=FALSE;
+        if(!SudekiMpStoryControlEpochMayRebind(story_native_control.epoch,roster?roster->epoch:0u,
+            story_native_control.thread==GetCurrentThreadId(),story_control_boundary(w,roster),empty) ||
+            party_menu_filter_owned || !party_actor_leases_empty() || !party_native_entries_exact()) return FALSE;
+        story_native_control.world=roster->world; story_native_control.descriptor=roster->descriptor;
+        story_native_control.epoch=roster->epoch;
+        /* Preserve monotonically increasing lease serials across world loads. */
+        ZeroMemory(&story_native_control.released,sizeof(story_native_control.released));
+        ZeroMemory(&story_native_control.turn_roster,sizeof(story_native_control.turn_roster));
         return story_control_scope(w,roster);
+    }
     if(!story_control_boundary(w,roster) || SudekiMpLanPartyControlHasLeases() ||
         !party_actor_leases_empty() || !party_native_entries_exact()) return FALSE;
     story_native_control.thread=GetCurrentThreadId();

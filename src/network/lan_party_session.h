@@ -86,6 +86,7 @@ typedef struct SudekiMpLanPartyConfig {
     uint8_t character[4];
 } SudekiMpLanPartyConfig;
 
+enum { SUDEKIMP_LAN_PARTY_PRESENCE_MENU=0x01, SUDEKIMP_LAN_PARTY_PRESENCE_AWAY=0x02 };
 typedef enum SudekiMpLanPartyCommandKind {
     SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE = 1, /* value bit0 menu, bit1 Away */
     SUDEKIMP_LAN_PARTY_COMMAND_SWAP,        /* target = character */
@@ -110,6 +111,7 @@ typedef struct SudekiMpLanPartyPresence {
     uint32_t ack_request[4];
     uint8_t ack_result[4]; /* SudekiMpPartySwapResult */
 } SudekiMpLanPartyPresence;
+BOOL SudekiMpLanPartyStoryCommandAdmissible(const SudekiMpLanPartyCommand *command);
 BOOL SudekiMpLanPartyCommandValid(const SudekiMpLanPartyCommand *command);
 /* Research hook: the host names each story-action EXPIRED decision (receive
  * not current, fenced by a presence change, stale at take). NULL = silent. */

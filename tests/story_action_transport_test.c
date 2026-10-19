@@ -171,7 +171,8 @@ static void exercise(unsigned character) {
         r.extra=0;
     }
     { /* #75 equip request: a weapon item of the fence character's family only. */
-        unsigned first=character==2u?0u:24u;
+        static const unsigned firsts[4]={36u,24u,0u,12u}; /* Buki, Elco, Tal, Ailish (2026-10-18) */
+        unsigned first=firsts[character];
         ++r.request; r.kind=SUDEKIMP_STORY_ACTION_EQUIP_WEAPON; r.slot=(uint8_t)(first+3u);
         assert(SudekiMpLanStoryActionRequestValid(&r));
         invalid=r; invalid.slot=(uint8_t)(first+12u); assert(!SudekiMpLanStoryActionRequestValid(&invalid));

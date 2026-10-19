@@ -565,6 +565,10 @@ typedef struct LocalCue {
 } LocalCue;
 static LocalCue local[4][SUDEKIMP_STORY_AUDIO_CAPACITY];
 static uint32_t local_stream[4],local_epoch[4];
+static unsigned listener_character=4u;
+void SudekiMpStoryCharacterAudioSetLocalCharacter(unsigned character) {
+    listener_character=character<4u?character:4u;
+}
 static uint16_t local_start[4];
 static const char *last_refusal[4];
 static BOOL playback_refused(unsigned character,const char *reason,unsigned count) {
@@ -686,8 +690,11 @@ BOOL SudekiMpStoryCharacterAudioPresent(const SudekiMpLanStoryNativeRoster *rost
         if(!slot || !name || digest(name)!=cue->hash) {
             ok=playback_refused(c,"cue_identity_or_capacity",s->count);break;
         }
-        /* Late join drops old one-shots; a live native shield loop may join. */
-        if((uint32_t)(s->tick-cue->started)>250u && strcmp(name,"BlockStart")) {slot->remote=cue->id;continue;}
+        /* Late join drops old one-shots; a live native shield loop may join.
+         * Another player's reload is consumed the same way: never played,
+         * never replayed while the host still lists it. */
+        if(((uint32_t)(s->tick-cue->started)>250u && strcmp(name,"BlockStart")) ||
+            SudekiMpStoryAudioSilentForListener(c,listener_character,name)) {slot->remote=cue->id;continue;}
         if(!native_ready) {
             native_ready=methods(base) && listener_exact();
             if(!native_ready) {ok=playback_refused(c,"native_methods_or_listener",s->count);break;}

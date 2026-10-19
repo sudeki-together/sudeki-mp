@@ -44,6 +44,10 @@ static void protection_cases(void) {
     assert(test_invulnerability_before && drain_test_invulnerability() && protection);
     initialized=FALSE; SudekiMpLanStoryMenuTestInvulnerable(FALSE);
 }
+BOOL SudekiMpLanStoryRuntimeStepAwayEnabled(void) { return TRUE; }
+BOOL SudekiMpLanStoryRuntimeCharacterAway(unsigned c) { (void)c; return FALSE; }
+BOOL SudekiMpLanStoryRuntimeAwayIntent(void) { return FALSE; }
+BOOL SudekiMpLanStoryRuntimeRequestAway(BOOL away) { (void)away; return TRUE; }
 int main(void) {
     protection_cases();
     initialized=TRUE; native_thread=GetCurrentThreadId(); local_player=1;

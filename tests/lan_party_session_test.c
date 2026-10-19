@@ -717,7 +717,12 @@ static void test_old_story_movement_profile(void) {
     SudekiMpLanPartyPoll(host,GetTickCount());
     CHECK(raw_read(sock,bytes,&source)==RAW_HEADER+9);
     CHECK(bytes[6]==RAW_REJECT && bytes[RAW_HEADER+8]==SUDEKIMP_LAN_ARENA_REJECT_MAP);
-    hello[44]=26;
+    hello[44]=26; /* Before PRESENCE/AWAY admission. */
+    raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
+    SudekiMpLanPartyPoll(host,GetTickCount());
+    CHECK(raw_read(sock,bytes,&source)==RAW_HEADER+9);
+    CHECK(bytes[6]==RAW_REJECT && bytes[RAW_HEADER+8]==SUDEKIMP_LAN_ARENA_REJECT_MAP);
+    hello[44]=27;
     raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
     SudekiMpLanPartyPoll(host,GetTickCount()); (void)raw_read(sock,bytes,&source);
     CHECK(bytes[6]==RAW_ACK);
@@ -1614,6 +1619,17 @@ static void test_monster_display_wire(void) {
     a->kind=SUDEKIMP_LAN_STORY_WORLD_CHEST_KIND; a->hit_points=0;
 }
 
+static void test_story_command_allowlist(void) {
+    for(unsigned player=0;player<5;++player) for(unsigned kind=1;kind<=9;++kind)
+    for(unsigned target=0;target<6;++target) for(unsigned value=0;value<8;++value) {
+        SudekiMpLanPartyCommand c={.request=1,.world=1,.revision=1,.generation=1,
+            .player=(uint8_t)player,.kind=(uint8_t)kind,.target=(uint8_t)target,.value=(uint8_t)value};
+        BOOL want=SudekiMpLanPartyCommandValid(&c) && (kind==SUDEKIMP_LAN_PARTY_COMMAND_SWAP ||
+            (kind==SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE && player>=1 && player<=3 && target==4 && !(value&1)));
+        CHECK(SudekiMpLanPartyStoryCommandAdmissible(&c)==want);
+    }
+    CHECK(!SudekiMpLanPartyStoryCommandAdmissible(NULL));
+}
 int main(void) {
     test_monster_display_wire();
     SudekiMpLanStoryView missing_host_view={0};
@@ -1628,6 +1644,7 @@ int main(void) {
     test_replica_fourth_actor_action_clock(); setup();
     if (!nodes[0] || !nodes[1] || !nodes[2] || !nodes[3]) return 1;
     test_three_clients(); test_transport_replica_consumption(); test_combat_mode_publication(); test_independent_disconnect_rejoin();
+    test_story_command_allowlist();
     test_old_story_movement_profile();
     test_raw_authority_and_retry(); test_raw_combat_mode(); test_fragment_admission(); test_presence_frame_floor(); test_busy_hash_and_timeouts();
     for (unsigned i = 0; i < 4; ++i) SudekiMpLanPartyDestroy(nodes[i], FALSE);

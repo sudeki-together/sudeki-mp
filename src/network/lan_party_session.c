@@ -30,7 +30,7 @@ enum {
      * 36-byte movement layout is unchanged; older gameplay profiles refuse
      * at handshake instead of silently dropping requests faster than one. */
     /* Profile 26 requires D9 source-specific, acknowledged inventory grants. */
-    STORY_OBSERVATION_PROFILE = 16, STORY_GAMEPLAY_PROFILE = 26, STORY_SCENE_INTERVAL = 100,
+    STORY_OBSERVATION_PROFILE = 16, STORY_GAMEPLAY_PROFILE = 27, STORY_SCENE_INTERVAL = 100,
     STORY_AREA_INTERVAL = 250,
     JETPACK_STATE_SIZE = 42, COMBAT_MODE_SIZE = 13, COMBAT_MODE_INTERVAL = 100,
     INPUT_EXTENSION_SIZE = 5, AILISH_STATE_SIZE = 11 + 9 * SUDEKIMP_LAN_WEAPON_SHOT_HISTORY,
@@ -446,10 +446,16 @@ BOOL SudekiMpLanPartyCommandValid(const SudekiMpLanPartyCommand *c) {
         default: return FALSE;
     }
 }
+BOOL SudekiMpLanPartyStoryCommandAdmissible(const SudekiMpLanPartyCommand *c) {
+    return SudekiMpLanPartyCommandValid(c) &&
+        (c->kind==SUDEKIMP_LAN_PARTY_COMMAND_SWAP ||
+         (c->kind==SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE && c->player>=1u && c->player<=3u &&
+          c->target==4u && !(c->value&SUDEKIMP_LAN_PARTY_PRESENCE_MENU)));
+}
 BOOL SudekiMpLanPartyPresenceValid(const SudekiMpLanPartyPresence *p) {
     if(!p || !p->sequence || !SudekiMpPartyOwnershipValid(&p->ownership)) return FALSE;
     for(unsigned i=0;i<4;++i)
-        if(p->ack_result[i]>SUDEKIMP_PARTY_SWAP_UNAUTHORIZED ||
+        if(p->ack_result[i]>SUDEKIMP_PARTY_AWAY_OTHER_AREA ||
             (!p->ack_request[i] && p->ack_result[i])) return FALSE;
     return TRUE;
 }
@@ -1681,7 +1687,7 @@ static void receive_message(SudekiMpLanPartySession *s,
             (p->received_sequence && !SudekiMpLanArenaSequenceNewer(sequence,p->received_sequence))) return;
         decode_command(body,&command);
         if(command.player!=seat || !SudekiMpLanPartyCommandValid(&command) ||
-            (s->config.story_observation==2u && command.kind!=SUDEKIMP_LAN_PARTY_COMMAND_SWAP)) return;
+            (s->config.story_observation==2u && !SudekiMpLanPartyStoryCommandAdmissible(&command))) return;
         command.lease=p->status.lease;
         if(command.request>p->last_command_taken &&
             (!p->command_pending || command.request==p->command.request)) {
@@ -3208,7 +3214,7 @@ BOOL SudekiMpLanPartyQueueCommand(SudekiMpLanPartySession *s,
     BOOL ok=FALSE; DWORD error=ERROR_SUCCESS;
     if(!s || s->config.story_observation==1u || !SudekiMpLanPartyCommandValid(command) ||
         command->player!=s->config.local_seat ||
-        (s->config.story_observation==2u && command->kind!=SUDEKIMP_LAN_PARTY_COMMAND_SWAP)) {
+        (s->config.story_observation==2u && !SudekiMpLanPartyStoryCommandAdmissible(command))) {
         SetLastError(ERROR_INVALID_PARAMETER); return FALSE;
     }
     AcquireSRWLockExclusive(&s->lock);

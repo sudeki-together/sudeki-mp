@@ -93,8 +93,28 @@ typedef enum SudekiMpLanStoryActionKind {
 } SudekiMpLanStoryActionKind;
 #define SUDEKIMP_STORY_ACTION_ITEM(slot,extra) ((unsigned)(slot)|((unsigned)(extra)<<8))
 /* Native weapon item ids per character: Tal 0..11, Ailish 12..23,
- * Buki 24..35, Elco 36..47 (CItem id +0x14, inventory categories 4/5/7/6). */
-BOOL SudekiMpStoryWeaponItemForCharacter(unsigned character,unsigned item);
+ * Elco 24..35, Buki 36..47 (CItem id +0x14). CONFIRMED_LIVE 2026-10-18:
+ * Buki's own native Weapons page lists ids 36..47, and an item lookup in
+ * Elco's category returned ids 26, 30 and 35. The weapon inventory category
+ * follows the portrait order instead (RVA 0x43F430 portrait enum plus four:
+ * Tal 4, Ailish 5, Buki 6, Elco 7; CONFIRMED_STATIC), so the id blocks of
+ * Buki and Elco are not in category order. One rule for the menu, the quick
+ * menu, the host request check and the frame validator. */
+/* Equipment and item requests the host may run while its world is in
+ * combat (the character's body must still be idle: not attacking, drawing
+ * or casting). Owner's account of vanilla, 2026-10-18: weapons change and
+ * items are used in and out of combat; armour changes only out of it. Pure. */
+static inline BOOL SudekiMpStoryActionAllowedInCombat(unsigned kind) {
+    return kind==SUDEKIMP_STORY_ACTION_EQUIP_WEAPON || kind==SUDEKIMP_STORY_ACTION_USE_ITEM;
+}
+static inline unsigned SudekiMpStoryWeaponCategoryForCharacter(unsigned character) {
+    static const unsigned category[4]={6u,7u,4u,5u}; /* Buki, Elco, Tal, Ailish */
+    return character<4u?category[character]:0u;
+}
+static inline BOOL SudekiMpStoryWeaponItemForCharacter(unsigned character,unsigned item) {
+    static const unsigned first[4]={36u,24u,0u,12u}; /* Buki, Elco, Tal, Ailish */
+    return character<4u && item>=first[character] && item<first[character]+12u;
+}
 typedef struct SudekiMpLanStoryActionRequest {
     SudekiMpLanStoryControlFence fence;
     uint32_t request,acknowledged_frame;

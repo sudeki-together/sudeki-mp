@@ -1252,6 +1252,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             (SudekiMpLogSetResearch(!config_key_false(config_path,L"StoryAreas",L"ResearchDiagnostics")),FALSE) ||
             /* Developer test start: place the party at fixed coordinates once
              * the saved game is loaded ([StoryAreas] TestStartLeader/Follower). */
+            (saved_story && (SudekiMpLanStoryRuntimeSetStepAway(!config_key_false(config_path,L"SudekiMP",L"StoryStepAway")),FALSE)) ||
             ((saved_story ? configure_test_start(game_module,config_path) : (void)0),FALSE) ||
             /* Explicit test-only protection; ordinary saved-story sessions
              * remain unchanged. Acquisition and cleanup belong to the host. */
@@ -1359,6 +1360,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                     FALSE,0,FALSE,NULL,FALSE,FALSE,FALSE,0) ||
                 !SudekiMpInstallLanArenaWindowPolicy(game_module) ||
                 !configure_background_audio(game_module,config_path) ||
+                (SudekiMpLanStoryRuntimeSetStepAway(!config_key_false(config_path,L"SudekiMP",L"StoryStepAway")),FALSE) ||
                 (SudekiMpLanStoryRuntimeSetClientNativeCamera(
                     !read_config_boolean(config_path,L"StoryAreas",L"ClientMathCamera")),FALSE) ||
                 !SudekiMpInstallLanStoryRuntime(game_module,&party)) {

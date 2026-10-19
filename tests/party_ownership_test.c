@@ -250,7 +250,29 @@ static void empty_host(void) {
     CHECK(s.assignment.character[0]==3 && !ready(&s,0));
     acquire(&s,0); CHECK(ready(&s,0));
 }
+static void story_away_edges(void) {
+    SudekiMpPartyOwnership s=initial(3);
+    uint32_t rev=s.assignment.revision;
+    CHECK(presence(&s,1,0,0)==SUDEKIMP_PARTY_SWAP_OK && s.assignment.revision==rev);
+    CHECK(presence(&s,1,0,1)==SUDEKIMP_PARTY_SWAP_OK);
+    CHECK(s.away==2 && s.control[1]==SUDEKIMP_PARTY_CONTROL_DRAINING && !ready(&s,1));
+    rev=s.assignment.revision;
+    CHECK(presence(&s,1,0,1)==SUDEKIMP_PARTY_SWAP_OK && s.assignment.revision==rev);
+    CHECK(SudekiMpPartyControlDrainComplete(&s,1,1,generation(&s,1)));
+    CHECK(!SudekiMpPartyControlAcquireBegin(&s,1,1,s.assignment.revision,generation(&s,1)));
+    CHECK(SudekiMpPartyOwnershipDisconnect(&s,1) && !s.away);
+    CHECK(SudekiMpPartyOwnershipConnect(&s,1) && !s.away);
+    CHECK(SudekiMpPartyControlAcquireBegin(&s,1,1,s.assignment.revision,generation(&s,1)));
+    CHECK(presence(&s,1,0,1)==SUDEKIMP_PARTY_SWAP_OK);
+    CHECK(s.control[1]==SUDEKIMP_PARTY_CONTROL_ACQUIRING && s.away==2);
+    CHECK(SudekiMpPartyControlAcquireCommit(&s,1,1,generation(&s,1)));
+    CHECK(s.control[1]==SUDEKIMP_PARTY_CONTROL_DRAINING);
+    CHECK(!SudekiMpPartyControlAcknowledge(&s,1,1,s.assignment.revision,generation(&s,1)));
+    CHECK(SudekiMpPartyControlDrainComplete(&s,1,1,generation(&s,1)));
+    CHECK(SudekiMpPartyOwnershipDisconnect(&s,1) && !s.away);
+}
 int main(void) {
+    story_away_edges();
     every_roster(); lifecycle(); menu_and_away(); disconnect_and_reservation();
     transaction_edges(); empty_host();
     if(failures) return 1;

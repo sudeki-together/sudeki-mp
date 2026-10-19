@@ -206,6 +206,10 @@ SudekiMpPartySwapResult SudekiMpPartyPresenceRequest(SudekiMpPartyOwnership *s,
     SudekiMpPartySwapResult r=request_valid(s,p,request,world,revision);
     if(r!=SUDEKIMP_PARTY_SWAP_OK) return r;
     if((menu!=0 && menu!=1) || (away!=0 && away!=1)) return SUDEKIMP_PARTY_SWAP_INVALID;
+    /* Repeated intent consumes its id but never fences every peer's input. */
+    if(!!(s->menu&bit(p))==menu && !!(s->away&bit(p))==away) {
+        s->last_request[p]=request; return SUDEKIMP_PARTY_SWAP_OK;
+    }
     if(away && !(s->away&bit(p)) && s->absence_policy==SUDEKIMP_PARTY_SHARED_PAUSE)
         s->paused=1;
     s->menu=(uint8_t)((s->menu&~bit(p))|(menu?bit(p):0));

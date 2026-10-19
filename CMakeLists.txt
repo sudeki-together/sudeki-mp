@@ -102,6 +102,7 @@ add_library(SudekiMP SHARED
     src/network/lan_arena_shared_simulation.c
     src/network/lan_arena_tal_combo_graph.c
     src/network/lan_arena_endpoint.c
+    src/network/lan_story_step_away.c
     src/network/lan_party_session.c src/network/lan_story_loot_grant.c src/network/lan_story_area_state.c src/network/lan_story_effect_state.c src/network/lan_story_vfx.c src/network/lan_story_cast_view.c src/network/lan_story_audio.c src/network/lan_story_xp.c
     src/network/lan_party_story.c
     src/network/lan_story_frame.c
@@ -132,6 +133,7 @@ add_library(SudekiMP SHARED
     src/hooks/lan_story_cinematic_audio.c
     src/hooks/lan_story_character_audio.c
     src/hooks/lan_story_recruit_setup.c
+    src/ui/story_away_banner.c
     src/ui/story_cinematic_view.c
     src/ui/story_markup.c
     src/hooks/lan_story_input.c
@@ -159,6 +161,7 @@ add_library(SudekiMP SHARED
     src/engine/sol_shop_stock.c
     src/network/lan_story_door_view.c
     src/hooks/lan_story_host_control.c
+    src/hooks/lan_story_host_pause.c
     src/hooks/lan_story_control.c
     src/hooks/story_player_turn.c
     src/hooks/story_ai_movement.c
@@ -2548,3 +2551,54 @@ target_compile_options(SudekiMP.StoryItemResultTest PRIVATE -Wall -Wextra -UNDEB
     -fwhole-program -ffunction-sections -fdata-sections)
 target_link_options(SudekiMP.StoryItemResultTest PRIVATE -Wl,--gc-sections)
 set_target_properties(SudekiMP.StoryItemResultTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.StoryStepAwayTest tests/story_step_away_test.c
+    src/network/lan_story_step_away.c src/engine/party_ownership.c)
+target_include_directories(SudekiMP.StoryStepAwayTest PRIVATE src)
+target_compile_options(SudekiMP.StoryStepAwayTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.StoryStepAwayTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.StoryAwayBannerTest tests/story_away_banner_test.c)
+target_include_directories(SudekiMP.StoryAwayBannerTest PRIVATE src)
+target_compile_options(SudekiMP.StoryAwayBannerTest PRIVATE -Wall -Wextra -Werror -UNDEBUG -fwhole-program -ffunction-sections -fdata-sections)
+target_link_options(SudekiMP.StoryAwayBannerTest PRIVATE -Wl,--gc-sections)
+set_target_properties(SudekiMP.StoryAwayBannerTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.StoryHostPauseImageTest tests/story_host_pause_image_test.c
+    src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
+target_include_directories(SudekiMP.StoryHostPauseImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryHostPauseImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryHostPauseImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryHostPauseImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+set(SUDEKIMP_STEP_AWAY_TRANSPORT_SOURCES ${SUDEKIMP_STORY_ACTION_TEST_SOURCES})
+list(REMOVE_ITEM SUDEKIMP_STEP_AWAY_TRANSPORT_SOURCES src/network/lan_party_session.c)
+add_executable(SudekiMP.StoryStepAwayTransportTest tests/story_step_away_transport_test.c ${SUDEKIMP_STEP_AWAY_TRANSPORT_SOURCES})
+target_include_directories(SudekiMP.StoryStepAwayTransportTest PRIVATE src)
+target_compile_definitions(SudekiMP.StoryStepAwayTransportTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.StoryStepAwayTransportTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryStepAwayTransportTest PRIVATE ws2_32 bcrypt)
+set_target_properties(SudekiMP.StoryStepAwayTransportTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.StoryStepAwayRuntimeTest tests/story_step_away_runtime_test.c)
+target_include_directories(SudekiMP.StoryStepAwayRuntimeTest PRIVATE src)
+target_compile_options(SudekiMP.StoryStepAwayRuntimeTest PRIVATE -Wall -Wextra -UNDEBUG -fwhole-program -ffunction-sections -fdata-sections)
+target_link_options(SudekiMP.StoryStepAwayRuntimeTest PRIVATE -Wl,--gc-sections)
+set_target_properties(SudekiMP.StoryStepAwayRuntimeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.StoryAwayMenuTest tests/story_away_menu_test.c)
+target_include_directories(SudekiMP.StoryAwayMenuTest PRIVATE src)
+target_compile_options(SudekiMP.StoryAwayMenuTest PRIVATE -Wall -Wextra -Werror -UNDEBUG -fwhole-program)
+set_target_properties(SudekiMP.StoryAwayMenuTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.StoryStepAwayHostTest tests/story_step_away_host_test.c)
+target_include_directories(SudekiMP.StoryStepAwayHostTest PRIVATE src)
+target_compile_options(SudekiMP.StoryStepAwayHostTest PRIVATE -Wall -Wextra -UNDEBUG -fwhole-program -ffunction-sections -fdata-sections)
+target_link_options(SudekiMP.StoryStepAwayHostTest PRIVATE -Wl,--gc-sections)
+set_target_properties(SudekiMP.StoryStepAwayHostTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.StoryAwayInteriorTest tests/story_away_interior_test.c)
+target_include_directories(SudekiMP.StoryAwayInteriorTest PRIVATE src)
+target_compile_options(SudekiMP.StoryAwayInteriorTest PRIVATE -Wall -Wextra -Werror -UNDEBUG -fwhole-program -ffunction-sections -fdata-sections)
+target_link_options(SudekiMP.StoryAwayInteriorTest PRIVATE -Wl,--gc-sections)
+set_target_properties(SudekiMP.StoryAwayInteriorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

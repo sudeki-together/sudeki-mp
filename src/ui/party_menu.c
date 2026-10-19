@@ -65,10 +65,14 @@ static void rebuild(void) {
         if(state.saved_story) {
             add(SUDEKIMP_PARTY_MENU_CLOSE,self,SUDEKIMP_PANEL_BUTTON,
                 278,182,566,42,"Return to Game",TRUE);
-            unsigned row=add(0,0,SUDEKIMP_PANEL_MEMBER,278,258,566,88,
+            if(!state.host && state.story_step_away)
+                add((state.away&bit)?SUDEKIMP_PARTY_MENU_RETURN:SUDEKIMP_PARTY_MENU_AWAY,self,
+                    SUDEKIMP_PANEL_BUTTON,278,240,566,42,(state.away&bit)?"Return to Play":"Away - watch the party",
+                    state.character[self]<4u);
+            unsigned row=add(0,0,SUDEKIMP_PANEL_MEMBER,278,306,566,88,
                 player_name(self),FALSE);
             snprintf(panel.controls[row].detail,sizeof(panel.controls[row].detail),
-                "%s - F1: switch to an unclaimed party member",state.story_detail[self]);
+                "%s%s",state.story_detail[self],(state.away&bit)?" - AI-controlled":" - F1: switch to an unclaimed party member");
         } else {
             add((state.away&bit)?SUDEKIMP_PARTY_MENU_RETURN:SUDEKIMP_PARTY_MENU_CLOSE,self,
                 SUDEKIMP_PANEL_BUTTON,278,182,566,42,"Return to Play",state.character[self]<4);

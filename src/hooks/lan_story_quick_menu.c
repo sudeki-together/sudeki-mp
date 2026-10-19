@@ -6,6 +6,7 @@
 #include "engine/log.h"
 #include "engine/spirit_activation_abi.h"
 #include "hooks/lan_party_control.h"
+#include "network/lan_story_handoff.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -180,14 +181,11 @@ static BOOL input_present(const SudekiMpLanStoryNativeRoster *r,
                     close_owned("skill_queued");
                 if((category_id==5u || category_id==2u) && slot>=0) {
                     static const uint8_t lookup_entry[]={0x53,0x8b,0x5c,0x24,0x08,0x55,0x56,0x57,0x8b,0x3d};
-                    /* Weapon inventory category per character (Buki, Elco,
-                     * Tal, Ailish), read from the live item table 2026-10-16;
-                     * the native weapons page resolves its rows the same way. */
-                    static const unsigned weapon_category[4]={7u,6u,4u,5u};
-                    static const unsigned weapon_first[4]={24u,36u,0u,12u}; /* 12 ids each; host re-checks */
+                    /* Weapon inventory category per character; the native
+                     * weapons page resolves its rows the same way. */
                     typedef void *(__attribute__((thiscall)) *ItemLookup)(void *,int,int);
                     BOOL weapon=category_id==2u;
-                    unsigned want=weapon?weapon_category[r->leader_character]:2u;
+                    unsigned want=weapon?SudekiMpStoryWeaponCategoryForCharacter(r->leader_character):2u;
                     void *inventory=readable(base+0x408d84u,4u)?*(void **)(base+0x408d84u):NULL;
                     uint8_t *def=NULL; unsigned item=~0u;
                     if(readable(inventory,0x130u) && readable(base+0x21ce0u,14u) &&
@@ -198,7 +196,7 @@ static BOOL input_present(const SudekiMpLanStoryNativeRoster *r,
                         *(void **)def==base+(weapon?0x2d3a28u:0x2d3b20u))
                         item=*(uint32_t *)(def+0x14u);
                     if(weapon) {
-                        if(item>=weapon_first[r->leader_character] && item<weapon_first[r->leader_character]+12u &&
+                        if(SudekiMpStoryWeaponItemForCharacter(r->leader_character,item) &&
                             request_action(actor_owner,SUDEKIMP_STORY_ACTION_EQUIP_WEAPON,item))
                             close_owned("weapon_queued");
                         else SudekiMpLogFormat("story_quick_menu event=weapon_refused row=%d item=%u\r\n",slot,item);

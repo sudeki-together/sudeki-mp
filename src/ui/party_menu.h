@@ -23,7 +23,7 @@ typedef struct SudekiMpPartyMenuState {
     char name[4][32], status[128];
     /* Saved-story presentation has no transfer/pause authority. It exposes
      * only the session/player pages and local close/leave operations. */
-    BOOL saved_story;
+    BOOL saved_story, story_step_away;
     char story_detail[4][96];
 } SudekiMpPartyMenuState;
 typedef BOOL (*SudekiMpPartyMenuCommand)(SudekiMpPartyMenuAction, unsigned);

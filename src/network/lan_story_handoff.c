@@ -11,10 +11,6 @@ static uint32_t get32(const uint8_t *p) {
 static void putfloat(uint8_t *p,float f) { uint32_t n; memcpy(&n,&f,4); put32(p,n); }
 static float getfloat(const uint8_t *p) { uint32_t n=get32(p); float f; memcpy(&f,&n,4); return f; }
 
-BOOL SudekiMpStoryWeaponItemForCharacter(unsigned character,unsigned item) {
-    static const unsigned first[4]={24u,36u,0u,12u}; /* Buki, Elco, Tal, Ailish */
-    return character<4u && item>=first[character] && item<first[character]+12u;
-}
 static BOOL action_slot_valid(unsigned kind,unsigned slot,unsigned extra,unsigned character) {
     if(kind==SUDEKIMP_STORY_ACTION_USE_ITEM) return SUDEKIMP_STORY_ACTION_ITEM(slot,extra)<999u;
     if(extra) return FALSE;

@@ -1,4 +1,5 @@
 #include "hooks/lan_story_menu.h"
+#include "hooks/lan_story_runtime.h"
 #include "ui/party_menu.h"
 #include "cleanroom/menu.h"
 #include "cleanroom/engine.h"
@@ -258,6 +259,9 @@ static BOOL command(SudekiMpPartyMenuAction action,unsigned argument) {
         SudekiMpLogFormat("lan_story_menu event=%s player=%u world_pause_requested=0\r\n",
             menu_open?"opened":"closed",local_player);
         return TRUE;
+    case SUDEKIMP_PARTY_MENU_AWAY:
+    case SUDEKIMP_PARTY_MENU_RETURN:
+        return argument==local_player && SudekiMpLanStoryRuntimeRequestAway(action==SUDEKIMP_PARTY_MENU_AWAY);
     case SUDEKIMP_PARTY_MENU_LEAVE:
         if(argument) return FALSE;
         leave_requested=TRUE;
@@ -384,6 +388,10 @@ void SudekiMpLanStoryMenuRefresh(const SudekiMpLobbyStatus *lobby,
         snprintf(next.status,sizeof(next.status),"Synchronizing host control...");
     if(!leave_requested && notice[0] && (int32_t)(notice_until-GetTickCount())>0)
         snprintf(next.status,sizeof(next.status),"%s",notice);
+    next.story_step_away=SudekiMpLanStoryRuntimeStepAwayEnabled();
+    for(unsigned p=0;p<4u;++p)
+        if(SudekiMpLanStoryRuntimeCharacterAway(next.character[p]) ||
+            (p==local_player && SudekiMpLanStoryRuntimeAwayIntent())) next.away|=(uint8_t)(1u<<p);
     state=next; SudekiMpPartyMenuStateSet(&state);
 }
 void SudekiMpLanStoryMenuNotice(const char *text) {

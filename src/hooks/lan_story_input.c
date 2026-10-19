@@ -25,7 +25,7 @@ static unsigned player;
 static HHOOK focus_hook;
 static HWND input_window;
 static BOOL focused;
-static void *sample_controller,*sample_actor;
+static void *sample_controller,*sample_actor,*away_controller,*away_actor;
 static uint32_t sample_transaction;
 static BOOL quick_down,quick_pending;
 static BOOL menu_down,menu_pending,menu_pending_raw; /* native action 0x18: main menu (#75) */
@@ -54,7 +54,7 @@ static void clear_sample(void) {
     quick_pending=menu_pending=FALSE; ranged_held=block_held=FALSE;
     clear_melee(); /* Preserve down bits until physical releases. */
     sample_x=sample_z=0; sample_scale=1.0f;
-    look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
+    if(!away_controller) { look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0; }
 }
 static void sample_quick(const NativeEvent *e,BOOL admitted) {
     /* Native4279E4 chooses listener+90 for action19. The digital enable bit
@@ -130,12 +130,12 @@ static LRESULT CALLBACK focus_messages(int code,WPARAM sent,LPARAM raw) {
                 (m->message==WM_ACTIVATE && LOWORD(m->wParam)==WA_INACTIVE) ||
                 (m->message==WM_ACTIVATEAPP && !m->wParam)) {
                 focused=FALSE; sample_x=sample_z=0;
-                quick_pending=menu_pending=FALSE; ranged_held=block_held=FALSE;
+                quick_pending=menu_pending=menu_pending_raw=FALSE; ranged_held=block_held=FALSE;
                 clear_melee();
                 look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
             } else if(m->message==WM_SETFOCUS) {
                 focused=TRUE; sample_x=sample_z=0;
-                quick_pending=menu_pending=FALSE; ranged_held=block_held=FALSE;
+                quick_pending=menu_pending=menu_pending_raw=FALSE; ranged_held=block_held=FALSE;
                 clear_melee();
                 look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
             }
@@ -231,12 +231,14 @@ static void __attribute__((thiscall,force_align_arg_pointer)) story_input(
                 sample_melee(&e,admitted && (controller[0x1d0u]&2u),GetTickCount());
                 sample_block(&e,admitted && (controller[0x1d0u]&2u));
             }
-            if(!admitted) goto done;
+            BOOL orbit=focused && window_exact() && controller==away_controller && away_actor &&
+                *(void **)(controller+ACTOR_TARGET)==away_actor;
+            if(!admitted && !orbit) goto done;
             /* Exact42781C checks this signed device owner. 4278F9..427980
              * maps29 to lateral and28 to forward magnitude. The ordinary
              * input backend dispatches releases through the same listener;
              * never call the native handler or seed its cached actions. */
-            if((owner==-1 || owner==e.owner) && (e.action==0x29u || e.action==0x28u || e.action==0x2bu)) {
+            if(admitted && (owner==-1 || owner==e.owner) && (e.action==0x29u || e.action==0x28u || e.action==0x2bu)) {
                 BOOL scaled=(controller[0x1d0u]&1u)!=0u;
                 if(scaled && e.action==0x2bu) {
                     /* Native4278E4 uses exact constant2.0 minus this axis. */
@@ -319,6 +321,21 @@ BOOL SudekiMpLanStoryInputArm(void *controller,void *actor,uint32_t transaction)
     }
     return TRUE;
 }
+BOOL SudekiMpLanStoryInputAwayLook(void *controller,void *actor,BOOL enabled) {
+    if(!native_thread_exact() || InterlockedCompareExchange(&callbacks,0,0)) return FALSE;
+    if(!enabled) {
+        if(away_controller) { look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0; }
+        away_controller=away_actor=NULL; return TRUE;
+    }
+    if(!SudekiMpLanStoryInputExact(controller,actor) || !ensure_focus_hook()) {
+        away_controller=away_actor=NULL; look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
+        return FALSE;
+    }
+    if(away_controller!=controller || away_actor!=actor) {
+        look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
+    }
+    away_controller=controller; away_actor=actor; return TRUE;
+}
 BOOL SudekiMpLanStoryInputSample(void *controller,void *actor,uint32_t transaction,
     float *x,float *z) {
     if(x) *x=0;
@@ -389,7 +406,10 @@ BOOL SudekiMpLanStoryInputOrbit(void *controller,void *actor,uint32_t transactio
     if(yaw) *yaw=0;
     if(pitch) *pitch=0;
     float x,z;
-    if(!yaw || !pitch || !SudekiMpLanStoryInputSample(controller,actor,transaction,&x,&z)) return FALSE;
+    if(!yaw || !pitch) return FALSE;
+    BOOL orbit=controller==away_controller && actor==away_actor && actor && focus_hook && window_exact() &&
+        SudekiMpLanStoryInputExact(controller,actor);
+    if(!orbit && !SudekiMpLanStoryInputSample(controller,actor,transaction,&x,&z)) return FALSE;
     uint32_t now=GetTickCount(),elapsed=look_sample_at?now-look_sample_at:0;
     look_sample_at=now;
     if(!focused || !elapsed || elapsed>100u) return TRUE;
@@ -448,6 +468,7 @@ BOOL SudekiMpLanStoryInputInstall(HMODULE image,unsigned client_player) {
      * installs no trampoline and never changes native controller/actor fields. */
     if(!base) { base=b; original_input=(NativeInput)(b+INPUT_HANDLER); }
     player=client_player;
+    away_controller=away_actor=NULL;
     quick_down=quick_pending=menu_down=menu_pending=menu_pending_raw=FALSE;
     InterlockedExchange(&retained,1);
     if(!SudekiMpInstallPointerHook(&input_hook,(void **)(b+INPUT_VT),
@@ -467,6 +488,7 @@ BOOL SudekiMpLanStoryInputUninstall(void) {
         (InterlockedCompareExchange(&native_thread,0,0) && !native_thread_exact())) {
         return retain_failure(ERROR_BUSY);
     }
+    away_controller=away_actor=NULL; menu_pending_raw=FALSE;
     clear_sample();
     if(focus_hook && !UnhookWindowsHookEx(focus_hook)) return retain_failure(GetLastError());
     focus_hook=NULL; input_window=NULL; focused=FALSE;

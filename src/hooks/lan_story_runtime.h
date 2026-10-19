@@ -9,6 +9,11 @@
  * creation is limited to the separately validated Lighthouse recruitment. */
 BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig *config);
 BOOL SudekiMpUninstallLanStoryRuntime(void);
+void SudekiMpLanStoryRuntimeSetStepAway(BOOL enabled);
+BOOL SudekiMpLanStoryRuntimeStepAwayEnabled(void);
+BOOL SudekiMpLanStoryRuntimeCharacterAway(unsigned character);
+BOOL SudekiMpLanStoryRuntimeAwayIntent(void);
+BOOL SudekiMpLanStoryRuntimeRequestAway(BOOL away);
 /* #71: FALSE keeps the client's mathematical orbit camera (ini [StoryAreas] ClientMathCamera=true). */
 void SudekiMpLanStoryRuntimeSetClientNativeCamera(BOOL enabled);
 /* Lobby-owned terminal UI transaction: prepare restoration while paused,

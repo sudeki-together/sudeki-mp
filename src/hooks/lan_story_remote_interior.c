@@ -1,3 +1,4 @@
+#include "hooks/lan_story_runtime.h"
 #include "hooks/lan_story_remote_interior.h"
 #include "hooks/lan_story_rejoin.h"
 
@@ -540,6 +541,14 @@ static void member_service(unsigned c,const SudekiMpLanStoryNativeRoster *roster
     }
 }
 
+/* This gate governs new entries only. Existing visits still drain/exit,
+ * including visits accepted before PRESENCE changed. */
+static BOOL entry_member_admitted(unsigned c,const SudekiMpLanStoryNativeRoster *roster,
+    const SudekiMpLanStoryScene *scene,uint8_t remote_characters) {
+    return !SudekiMpLanStoryRuntimeCharacterAway(c) && members[c].phase==IDLE &&
+        c!=roster->leader_character && (remote_characters&(1u<<c)) &&
+        (roster->available_mask&(1u<<c)) && !(scene->inside_mask&(1u<<c));
+}
 void SudekiMpLanStoryRemoteInteriorHostService(const SudekiMpLanStoryNativeRoster *roster,
     const SudekiMpLanStoryScene *scene,uint8_t remote_characters,uint8_t input_fresh,uint32_t now) {
     if(!ready || !roster || !scene || roster->leader_character>=4u) return;
@@ -574,8 +583,7 @@ void SudekiMpLanStoryRemoteInteriorHostService(const SudekiMpLanStoryNativeRoste
     float lead_at[3]; BOOL lead_pos=position_of(roster->actors[roster->leader_character],lead_at);
     for(unsigned c=0;c<4u;++c) {
         float at[3],trigger[3],distance;
-        if(members[c].phase!=IDLE || c==roster->leader_character || !(remote_characters&(1u<<c)) ||
-            !(roster->available_mask&(1u<<c)) || (scene->inside_mask&(1u<<c)) || !position_of(roster->actors[c],at)) continue;
+        if(!entry_member_admitted(c,roster,scene,remote_characters) || !position_of(roster->actors[c],at)) continue;
         BOOL close_by=FALSE; const Door *hit=NULL;
         for(unsigned d=0;d<DOORS;++d) {
             /* One house at a time (#83): the house in use, or the lead's. */

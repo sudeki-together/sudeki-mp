@@ -11,6 +11,28 @@ BOOL SudekiMpStoryCharacterAudioPresent(const SudekiMpLanStoryNativeRoster *rost
     SudekiMpStoryCharacterAudioExact exact,void *context);
 BOOL SudekiMpStoryCharacterAudioStop(unsigned character,SudekiMpStoryCharacterAudioExact exact,void *context);
 BOOL SudekiMpStoryCharacterAudioRetains(void);
+/* Client: the character this game positively controls, or 4 while unproven.
+ * Present uses it only to decide which replayed cues are another player's. */
+void SudekiMpStoryCharacterAudioSetLocalCharacter(unsigned character);
+/* Another player's reload is not this listener's business (owner 2026-10-18:
+ * Tal need not hear Ailish or Elco reload). Reload and recharge cues in the
+ * ranged characters' banks: "reload", "ailish_reload_N", "Elco_reload_N" and
+ * "<weapon>_recharge" (ALICESoundScript.xsb, ELCOSoundScript.xsb). The own
+ * character keeps them; an unproven own character counts as another. Pure. */
+static inline int SudekiMpStoryAudioSilentForListener(unsigned character,unsigned local_character,
+    const char *name) {
+    if(!name || (character<4u && character==local_character)) return 0;
+    size_t n=0; while(name[n]) ++n;
+    for(size_t i=0;i+6u<=n;++i) {
+        const char *r="reload"; size_t k=0;
+        while(k<6u && (name[i+k]|0x20)==r[k]) ++k;
+        if(k==6u) return 1;
+    }
+    const char *suffix="recharge"; size_t s=8u;
+    if(n<s+1u || name[n-s-1u]!='_') return 0;
+    for(size_t k=0;k<s;++k) if((name[n-s+k]|0x20)!=suffix[k]) return 0;
+    return 1;
+}
 /* Caller proves a retained parent-free FX sound component inside the exact
  * client residency operation. Uses the native bank setter/refcount lifetime. */
 BOOL SudekiMpStoryCharacterAudioBindEffect(const SudekiMpLanStoryNativeRoster *roster,

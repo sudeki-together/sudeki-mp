@@ -11272,12 +11272,14 @@ int wmain(int argc, wchar_t **argv) {
     puts("skill_trace_image_test: PASS");
     return 0;
 }
-/* This executable exercises Test Room owners only. The story runtime is not
- * linked; its native roster/noncaster grants must stay explicitly closed. */
+/* Story runtime is not linked. Only the explicit inert epoch fixture may
+ * grant a story roster; all other story native grants remain closed. */
 #include "hooks/lan_story_cast.h"
 BOOL SudekiMpLanStoryCastLocalNoncaster(void *actor) { (void)actor; return FALSE; }
+BOOL SudekiMpStoryEpochFixtureRosterExact(const SudekiMpControlUpdateDispatchWitness *,
+    const SudekiMpLanStoryNativeRoster *);
 BOOL SudekiMpLanStoryObserverRosterStillExact(const SudekiMpControlUpdateDispatchWitness *w,
-    const SudekiMpLanStoryNativeRoster *r) { (void)w; (void)r; return FALSE; }
+    const SudekiMpLanStoryNativeRoster *r) { return SudekiMpStoryEpochFixtureRosterExact(w,r); }
 
 BOOL SudekiMpLanStoryObserverNativeRosterExact(const SudekiMpLanStoryNativeRoster *r) {
     (void)r; return FALSE;

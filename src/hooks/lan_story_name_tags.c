@@ -204,8 +204,9 @@ void SudekiMpLanStoryNameTagsRender(void *device) {
     BOOL have_camera=FALSE;
     memset(&extras,0,sizeof(extras)); extras.overlay=TRUE;
     for(unsigned c=0;c<4u;++c) {
-        char name[NAME_CHARS];
-        if(!SudekiMpLanStoryRuntimePlayerName(c,name) || !name[0]) continue;
+        char player_name[NAME_CHARS],name[NAME_CHARS+5];
+        if(!SudekiMpLanStoryRuntimePlayerName(c,player_name) || !player_name[0]) continue;
+        snprintf(name,sizeof(name),"%s%s",player_name,SudekiMpLanStoryRuntimeCharacterAway(c)?" (AI)":"");
         const uint8_t *entity=SudekiMpCleanroomEngineActorEntity(actors[c]);
         if(!readable(entity,0x48u)) continue;
         const uint8_t *position=*(const uint8_t *const *)(entity+0x44u);
@@ -233,14 +234,14 @@ void SudekiMpLanStoryNameTagsRender(void *device) {
          * its size scaled by min(W/960,H/720); center it on the projection. */
         const float size=16.f;
         float scale=fminf(cam.width/960.f,cam.height/720.f);
-        float pixels=SudekiMpTitleViewTextWidth(name,NAME_CHARS,size*scale);
+        float pixels=SudekiMpTitleViewTextWidth(name,sizeof(name),size*scale);
         if(pixels<0) continue;
         /* One overlay submission per tag: the overlay renderer takes a single
          * opacity, and each tag fades on its own distance. */
         memset(&extras,0,sizeof(extras)); extras.overlay=TRUE;
         SudekiMpPanelText *t=&extras.texts[extras.text_count++];
         t->x=(sx-pixels*.5f)*960.f/cam.width; t->y=sy*720.f/cam.height; t->size=size; t->width=400.f;
-        snprintf(t->text,sizeof(t->text),"%.31s",name);
+        snprintf(t->text,sizeof(t->text),"%s",name);
         if(tag_logs<8u) {
             ++tag_logs;
             SudekiMpLogFormat("lan_story_name_tags event=tag character=%u screen=%.0f,%.0f depth=%.1f opacity=%.2f\r\n",c,sx,sy,depth,opacity);

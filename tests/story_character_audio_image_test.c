@@ -789,6 +789,35 @@ int main(int argc,char **argv) {
     assert(!SudekiMpStoryCharacterAudioPresent(&roster,&frame,playback_exact,NULL) && stub_calls==calls_before+1);
     admitted=TRUE;
     puts("PASS replay deduplication, completed-local/active-host suppression, expired bank cleanup and closed admission");
+    /* Another player's reload: consumed without a native call and never
+     * replayed while the host keeps listing it (owner 2026-10-18). */
+    {
+        char saved_name[96];memcpy(saved_name,names,sizeof(saved_name));
+        memset(names,0,sizeof(names));strcpy(names,"ailish_reload_2");
+        SudekiMpStoryCharacterAudioSetLocalCharacter(3);
+        SudekiMpStoryAudio reload=frame;reload.count=1;
+        reload.cues[0]=(SudekiMpStoryAudioCue){910,reload.tick,digest(names),0x3f800000,0,1,0};
+        uint32_t calls_reload=stub_calls;
+        assert(SudekiMpStoryCharacterAudioPresent(&roster,&reload,playback_exact,NULL) && stub_calls==calls_reload);
+        assert(SudekiMpStoryCharacterAudioPresent(&roster,&reload,playback_exact,NULL) && stub_calls==calls_reload);
+        reload.count=0;assert(SudekiMpStoryCharacterAudioPresent(&roster,&reload,playback_exact,NULL) && stub_calls==calls_reload);
+        assert(!SudekiMpStoryCharacterAudioRetains());
+        SudekiMpStoryCharacterAudioSetLocalCharacter(4);memcpy(names,saved_name,sizeof(saved_name));
+    }
+    {
+        /* The listener rule itself: names from the shipped Ailish and Elco banks. */
+        static const char *const silent[]={"reload","ailish_reload_1","ailish_reload_3","Elco_reload_2",
+            "shockstaff_recharge","wizardwood_recharge","Chronotron_recharge","ion_fluxinator_recharge"};
+        static const char *const kept[]={"Royal_Sceptre_fire","Xurics_Shock_staff","armourfoley","attack_sml",
+            "unsheath","-1Grass","recharge","laugh_random","heal",""};
+        for(unsigned i=0;i<sizeof(silent)/sizeof(*silent);++i) {
+            assert(SudekiMpStoryAudioSilentForListener(3,2,silent[i]) && SudekiMpStoryAudioSilentForListener(1,4,silent[i]));
+            assert(!SudekiMpStoryAudioSilentForListener(3,3,silent[i]) && !SudekiMpStoryAudioSilentForListener(1,1,silent[i]));
+        }
+        for(unsigned i=0;i<sizeof(kept)/sizeof(*kept);++i) assert(!SudekiMpStoryAudioSilentForListener(3,2,kept[i]));
+        assert(!SudekiMpStoryAudioSilentForListener(3,2,NULL));
+    }
+    puts("PASS another player's reload and recharge cues are silent on this game; the own character keeps them");
     frame.count=0;frame.start_sequence=1;frame.start_tick=frame.tick;
     assert(SudekiMpStoryCharacterAudioPresent(&roster,&frame,playback_exact,NULL) && startup_calls==1);
     assert(SudekiMpStoryCharacterAudioPresent(&roster,&frame,playback_exact,NULL) && startup_calls==1);

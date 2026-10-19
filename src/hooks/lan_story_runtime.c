@@ -1,4 +1,7 @@
 #include "hooks/lan_story_runtime.h"
+#include "network/lan_story_step_away.h"
+#include "ui/story_away_banner.h"
+#include "hooks/lan_story_host_pause.h"
 #include "hooks/lan_story_name_tags.h"
 #include "hooks/lan_story_observer.h"
 #include "hooks/lan_story_test_start.h"
@@ -320,6 +323,32 @@ static SudekiMpLanPartyPresence story_presence,story_published;
 static BOOL story_policy_initialized,story_key_focused,story_key_down;
 static uint32_t story_next_request,story_pending_request;
 static unsigned story_swap_traces;
+static BOOL story_step_away=TRUE;
+static SudekiMpStoryAwayClient away_client;
+static SudekiMpStoryCombatSample away_combat;
+static uint32_t away_pending_request,away_retry_at,away_ui_at;
+static BOOL away_ui_seen;
+static SudekiMpLanPartyLease away_connection;
+static void service_step_away(void);
+void SudekiMpLanStoryRuntimeSetStepAway(BOOL enabled) { story_step_away=enabled; }
+BOOL SudekiMpLanStoryRuntimeStepAwayEnabled(void) { return saved_profile && story_step_away; }
+BOOL SudekiMpLanStoryRuntimeCharacterAway(unsigned c) {
+    SudekiMpLanPartyPresence presence;
+    if(!session || !saved_profile || c>=4u || runtime_thread!=GetCurrentThreadId() ||
+        !SudekiMpLanPartyGetPresence(session,&presence)) return FALSE;
+    unsigned p=SudekiMpPartyCharacterOwner(&presence.ownership.assignment,c);
+    return p<4u && (presence.ownership.away&(1u<<p));
+}
+BOOL SudekiMpLanStoryRuntimeAwayIntent(void) { return away_client.phase!=SUDEKIMP_STORY_AWAY_NONE; }
+BOOL SudekiMpLanStoryRuntimeRequestAway(BOOL away) {
+    if(!saved_profile || !story_step_away || !session || !local_seat ||
+        runtime_thread!=GetCurrentThreadId() || SudekiMpLanPartyLocalCharacter(session)>=4u ||
+        InterlockedCompareExchange(&stopping,0,0)) return FALSE;
+    SudekiMpStoryAwayIntent(&away_client,away,GetTickCount());
+    SudekiMpLanStoryInputClear();
+    return TRUE;
+}
+
 static BOOL publish_story_ownership(void);
 static BOOL story_swap_blocks(unsigned player);
 
@@ -691,7 +720,7 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
     host_cinematic_view=cinematic;
     if(world_applied && client_local_selected && !cinematic) {
         float yaw=0,pitch=0;
-        if(client_input_ready && !SudekiMpLanStoryMenuCapturesInput() &&
+        if((client_input_ready || away_client.phase!=SUDEKIMP_STORY_AWAY_NONE) && !SudekiMpLanStoryMenuCapturesInput() &&
             !SudekiMpLanStoryQuickMenuCapturesInput() &&
             !SudekiMpLanStoryInputOrbit(roster->controller,roster->actors[client_control_fence.character],
                 client_control_fence.transaction,&yaw,&pitch)) {
@@ -750,7 +779,8 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
                 else (void)SudekiMpLanStoryClientCameraReseat(&owner);
                 reseat_pending=FALSE;
             }
-            (void)SudekiMpLanStoryInputLookAxes(&look_x,&look_y);
+            if(!SudekiMpLanStoryMenuCapturesInput() && !SudekiMpLanStoryQuickMenuCapturesInput())
+                (void)SudekiMpLanStoryInputLookAxes(&look_x,&look_y);
             native_view=present_native_camera(roster,GetTickCount(),look_x,look_y);
         }
         if(speech_yield) native_view=TRUE;
@@ -792,6 +822,12 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
         }
         /* Character cues follow native host ownership; they do not reopen
          * the contained client's actor simulation or block/attack state. */
+        {
+            /* The same proof the shot audio uses for "this game's own". */
+            unsigned own=session?SudekiMpLanPartyLocalCharacter(session):4u;
+            SudekiMpStoryCharacterAudioSetLocalCharacter(
+                (own<4u && client_local_selected && roster->leader_character==own)?own:4u);
+        }
         for(unsigned c=0;c<4;++c) {
             SudekiMpStoryAudio audio;
             if(frame->connection && (roster->available_mask&(1u<<c)) &&
@@ -1395,6 +1431,7 @@ static void present(void) {
         presentation_sample.native_roster=roster;
         presentation_sample.sequence=sample.sequence; presentation_sample.host_tick=sample.host_tick;
         presentation_sample.receipt=sample_receipt; presentation_sample.valid=effects_ready=TRUE;
+        away_combat=(SudekiMpStoryCombatSample){sample_receipt,sample.epoch,sample.revision,1,sample.combat_mode};
         if(client_catchup.transaction && client_catchup.target.revision==remote.revision &&
             SudekiMpLanStorySceneSame(&client_catchup.target,&remote) &&
             (!menu_lobby_known || menu_lobby.admission[local_seat].phase!=SUDEKIMP_LOBBY_ADMISSION_COMPLETE) &&
@@ -1678,7 +1715,7 @@ static void service_story_ownership(void *controller,const SudekiMpControlUpdate
         if(live && !(o->connected&(1u<<p))) (void)SudekiMpPartyOwnershipConnect(o,p);
         /* A launch ticket that has not connected yet is not a departure. */
         if(!live && (o->connected&(1u<<p))) (void)SudekiMpPartyOwnershipDisconnect(o,p);
-        if(host_control[p].ready && !host_control[p].draining && !story_swap_blocks(p))
+        if(host_control[p].ready && !host_control[p].draining && !story_swap_blocks(p) && !(o->away&(1u<<p)))
             story_control_confirmed(p);
         else if(!host_control[p].native_key.token) story_control_released(p);
     }
@@ -1691,6 +1728,24 @@ static void service_story_ownership(void *controller,const SudekiMpControlUpdate
             SudekiMpLanPartyPeerStatusGet(session,p,&peer) && peer.transport_confirmed &&
             peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING && same_connection(&peer.lease,&command.lease);
         SudekiMpPartySwapResult result=SUDEKIMP_PARTY_SWAP_UNAUTHORIZED;
+        if(sender && story_step_away && command.kind==SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE) {
+            result=SUDEKIMP_PARTY_SWAP_STALE;
+            if(command.world==o->assignment.world && command.revision==o->assignment.revision &&
+                command.generation==(c<4u?o->assignment.generation[c]:0u)) {
+                SudekiMpStoryAwayAdmission admission={
+                    .same_area=c<4u && SudekiMpLanStorySceneSameArea(scene,roster.leader_character,c),
+                    .swap_involves=o->phase!=SUDEKIMP_PARTY_SWAP_IDLE &&
+                        (o->player==p || o->displaced==p || !o->player),
+                    .prepare=host_control[p].native_key.token && !host_control[p].ready && !host_control[p].draining};
+                BOOL away=(command.value&SUDEKIMP_LAN_PARTY_PRESENCE_AWAY)!=0;
+                result=SudekiMpStoryAwayAdmit(o,p,away,&admission);
+                if(result==SUDEKIMP_PARTY_SWAP_OK)
+                    result=SudekiMpPartyPresenceRequest(o,p,command.request,command.world,command.revision,0,away);
+            }
+            SudekiMpLogFormat("story_step_away event=request player=%u away=%u request=%lu result=%u revision=%lu\r\n",
+                p,!!(command.value&SUDEKIMP_LAN_PARTY_PRESENCE_AWAY),(unsigned long)command.request,
+                result,(unsigned long)o->assignment.revision);
+        }
         if(sender && command.kind==SUDEKIMP_LAN_PARTY_COMMAND_SWAP && (o->connected&(1u<<p))) {
             result=SUDEKIMP_PARTY_SWAP_STALE;
             if(command.generation==(c<4u?o->assignment.generation[c]:0u)) {
@@ -1749,7 +1804,8 @@ static void poll_story_swap(void) {
         if(pressed) SudekiMpLanStoryMenuNotice("Waiting for the host before switching.");
         return;
     }
-    if(story_pending_request && state.ack_request[local_seat]>=story_pending_request) {
+    if(story_pending_request && state.ack_request[local_seat]>story_pending_request) story_pending_request=0;
+    if(story_pending_request && state.ack_request[local_seat]==story_pending_request) {
         unsigned result=state.ack_result[local_seat]; story_pending_request=0;
         SudekiMpLanStoryMenuNotice(result==SUDEKIMP_PARTY_SWAP_OK?"Switching character...":
             result==SUDEKIMP_PARTY_SWAP_OCCUPIED?"That character is already claimed.":
@@ -1757,7 +1813,7 @@ static void poll_story_swap(void) {
             result==SUDEKIMP_PARTY_SWAP_STALE?"Party changed; press F1 again.":
             "Wait until combat, dialogue and other transfers have finished.");
     }
-    if(!pressed || SudekiMpLanStoryMenuCapturesInput()) return;
+    if(!pressed || SudekiMpLanStoryMenuCapturesInput() || away_client.phase!=SUDEKIMP_STORY_AWAY_NONE) return;
     const SudekiMpPartyOwnership *o=&state.ownership;
     if(story_pending_request || o->phase!=SUDEKIMP_PARTY_SWAP_IDLE) {
         SudekiMpLanStoryMenuNotice("A character transfer is still pending."); return;
@@ -1886,12 +1942,15 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
     SudekiMpLanStoryControlObserveIdleContact(w,known?&roster:NULL);
     refresh_split_eligibility(w,scene,known?&roster:NULL);
     uint32_t now=GetTickCount();
-    {   /* Dead lead keeps its slot while any remote player drives a member. */
+    {   /* Away peers cease to keep the dead-lead hold armed after native
+         * release. Until then a retained lease still needs its original lead
+         * identity to finish draining; dropping that hold early strands it. */
         BOOL remote=FALSE; void *remote_actors[3]={0};
         for(unsigned p=1;p<4u;++p) {
             SudekiMpLanPartyPeerStatus peer={0}; unsigned c=SudekiMpLanPartyPlayerCharacter(session,p);
             if(SudekiMpLanPartyPeerStatusGet(session,p,&peer) && peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
-                peer.transport_confirmed && c<4u) {
+                peer.transport_confirmed && c<4u &&
+                (!(story_presence.ownership.away&(1u<<p)) || host_control[p].native_key.token)) {
                 remote=TRUE;
                 if(known && (roster.available_mask&(1u<<c))) remote_actors[p-1u]=roster.actors[c];
             }
@@ -1930,7 +1989,8 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
             trace_control_block(p,"split_transition_hold"); continue;
         }
         if(host_control[p].native_key.token) {
-            const char *drain_reason=story_swap_blocks(p)?"character_swap":
+            const char *drain_reason=(story_presence.ownership.away&(1u<<p))?"stepped_away":
+                story_swap_blocks(p)?"character_swap":
                 !connected?"peer_not_observing":
                 character!=host_control[p].native_key.seat?"character_changed":
                 !same_connection(&peer.lease,&host_control[p].connection)?"connection_changed":
@@ -1961,20 +2021,21 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
                     (known && SudekiMpLanStoryControlDrain(w,&roster,&host_control[p].native_key))) {
                     uint32_t transaction=host_control[p].transaction;
                     memset(&host_control[p],0,sizeof(host_control[p])); host_control[p].transaction=transaction;
+                    story_control_released(p);
                     trace_control_block(p,"drained");
                 } else trace_control_block(p,world_load?"drain_load_native":
                     !known?"drain_roster_unknown":"drain_native_refused");
                 continue;
             }
         } else {
-            if(connected) trace_control_block(p,story_swap_blocks(p)?"offer_swap":!known?"offer_roster_unknown":
+            if(connected) trace_control_block(p,(story_presence.ownership.away&(1u<<p))?"offer_stepped_away":story_swap_blocks(p)?"offer_swap":!known?"offer_roster_unknown":
                 !host_binding_ready?"offer_host_binding":character==roster.leader_character?"offer_is_leader":
                 !(roster.available_mask&(1u<<character))?"offer_unavailable":
                 capture.epoch!=scene->epoch || capture.revision!=scene->revision?"offer_capture_scene":
                 capture.actors[character]!=roster.actors[character] || !capture.generation[character]?"offer_capture_actor":
                 !presentation_fresh(now,capture.last_tick)?"offer_capture_stale":
                 !SudekiMpLanPartyStoryCatchupComplete(session,&peer.lease)?"offer_catchup":"offer_attempt");
-            if(story_swap_blocks(p) || !connected || !known || !host_binding_ready || character==roster.leader_character ||
+            if((story_presence.ownership.away&(1u<<p)) || story_swap_blocks(p) || !connected || !known || !host_binding_ready || character==roster.leader_character ||
                 !(roster.available_mask&(1u<<character)) ||
                 capture.epoch!=scene->epoch || capture.revision!=scene->revision ||
                 capture.actors[character]!=roster.actors[character] || !capture.generation[character] ||
@@ -2399,6 +2460,98 @@ static void service_client_action(const SudekiMpLanPartyLease *connection,
         client_action_sent_at=now;
     }
 }
+static void away_note_ui(uint32_t now) {
+    if(main_menu_open() || shop_open() || examine_open()) { away_ui_seen=TRUE; away_ui_at=now; }
+}
+static void away_m_decision(BOOL owned,BOOL admitted,uint32_t now) {
+    SudekiMpLanStoryScene remote={0}; SudekiMpLanPartyPeerStatus peer={0};
+    BOOL known=SudekiMpLanPartyPeerStatusGet(session,local_seat,&peer) &&
+        SudekiMpLanPartyGetStoryScene(session,&peer.lease,now,&remote);
+    SudekiMpStoryCombatSample sample=away_combat;
+    sample.valid=sample.valid && presentation_sample.valid;
+    SudekiMpStoryMenuInput input={.phase=away_client.phase,
+        .combat=SudekiMpStoryCombatJudge(&sample,now,known && remote.phase==SUDEKIMP_LAN_STORY_READY,remote.epoch,remote.revision),
+        .last_ui_at=away_ui_at,.ui_seen=away_ui_seen,
+        .party_menu=SudekiMpLanStoryMenuCapturesInput(),.main_menu=main_menu_open(),
+        .owned=owned,.admitted=admitted,.quick_menu=SudekiMpLanStoryQuickMenuCapturesInput(),
+        .shop=shop_open(),.examine=examine_open(),.cinematic=host_cinematic_view};
+    SudekiMpStoryMenuDecision decision=SudekiMpStoryAwayMenuDecision(&input,now);
+    static const char *const names[]={"IGNORE","RETURN","CLOSE","STEP_AWAY","OPEN","WAIT"};
+    SudekiMpLogFormat("story_step_away event=M decision=%s combat=%u phase=%u age_ms=%ld\r\n",
+        names[decision],input.combat,input.phase,(long)(int32_t)(now-sample.receipt));
+    switch(decision) {
+    case SUDEKIMP_STORY_M_RETURN: (void)SudekiMpLanStoryRuntimeRequestAway(FALSE); break;
+    case SUDEKIMP_STORY_M_STEP_AWAY: (void)SudekiMpLanStoryRuntimeRequestAway(TRUE); break;
+    case SUDEKIMP_STORY_M_OPEN: (void)SudekiMpLanStoryMainMenuRequestOpen(); break;
+    case SUDEKIMP_STORY_M_CLOSE: (void)SudekiMpLanStoryMainMenuRequestClose(); break;
+    case SUDEKIMP_STORY_M_WAIT: SudekiMpLanStoryMenuNotice("Waiting for the host..."); break;
+    default: break;
+    }
+}
+static void service_step_away(void) {
+    if(!saved_profile || !story_step_away || !local_seat || !session) return;
+    uint32_t now=GetTickCount(); away_note_ui(now);
+    SudekiMpLanPartyPeerStatus peer={0}; SudekiMpLanPartyPresence presence;
+    BOOL connected=SudekiMpLanPartyPeerStatusGet(session,local_seat,&peer) &&
+        peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING && peer.transport_confirmed;
+    if(!connected || (away_connection.token && !same_connection(&away_connection,&peer.lease))) {
+        (void)SudekiMpStoryAwayObserve(&away_client,0,0,SUDEKIMP_PARTY_CONTROL_AI,0,now);
+        away_pending_request=away_retry_at=0; memset(&away_connection,0,sizeof(away_connection));
+        away_combat.valid=0;
+        (void)SudekiMpLanStoryInputTakeMainMenuRaw();
+        if(!connected) return;
+    }
+    away_connection=peer.lease;
+    if(away_client.phase!=SUDEKIMP_STORY_AWAY_NONE) {
+        if(SudekiMpLanStoryInputTakeMainMenuRaw()) away_m_decision(FALSE,FALSE,now);
+    } else if((!presentation_sample.valid || !presentation_fresh(now,presentation_sample.receipt)) &&
+        SudekiMpLanStoryInputTakeMainMenuRaw()) {
+        /* Even an unpresentable/stale world must answer M with UNKNOWN,
+         * instead of retaining the edge until a later fresh combat frame. */
+        away_m_decision(client_local_selected,connected,now);
+    }
+    if(!SudekiMpLanPartyGetPresence(session,&presence)) {
+        if(away_client.phase==SUDEKIMP_STORY_AWAY_RETURNING &&
+            SudekiMpStoryAwayObserve(&away_client,connected,1,SUDEKIMP_PARTY_CONTROL_AI,0,now))
+            SudekiMpLanStoryMenuNotice("Couldn't take control - press M to try again");
+        return;
+    }
+    const SudekiMpPartyOwnership *o=&presence.ownership;
+    BOOL away=(o->away&(1u<<local_seat))!=0;
+    if(away_pending_request && presence.ack_request[local_seat]>away_pending_request) away_pending_request=0;
+    if(away_pending_request && presence.ack_request[local_seat]==away_pending_request) {
+        unsigned result=presence.ack_result[local_seat]; away_pending_request=0;
+        if(result==SUDEKIMP_PARTY_SWAP_BUSY) away_retry_at=now+250u;
+        else if(result!=SUDEKIMP_PARTY_SWAP_OK && result!=SUDEKIMP_PARTY_SWAP_STALE) {
+            SudekiMpStoryAwayRefused(&away_client,away);
+            SudekiMpLanStoryMenuNotice(result==SUDEKIMP_PARTY_AWAY_OTHER_AREA?
+                "Too far from the party to step away":"Could not step away - try again");
+        }
+    }
+    /* A second M can reverse intent before the first request's ACK. Do not
+     * call the return complete while that first AWAY is still in flight. */
+    BOOL drives=client_input_ready;
+    uint32_t return_at=away_client.return_at;
+    unsigned previous=away_client.phase;
+    if(SudekiMpStoryAwayObserve(&away_client,connected,away,(away_pending_request && away_client.phase==SUDEKIMP_STORY_AWAY_RETURNING)?
+        SUDEKIMP_PARTY_CONTROL_AI:o->control[local_seat],drives,now))
+        SudekiMpLanStoryMenuNotice("Couldn't take control - press M to try again");
+    if(previous==SUDEKIMP_STORY_AWAY_RETURNING && away_client.phase==SUDEKIMP_STORY_AWAY_NONE)
+        SudekiMpLogFormat("story_step_away event=returned press_to_control_ms=%lu\r\n",(unsigned long)(now-return_at));
+    if(away_pending_request || away_client.want_away==away ||
+        (away_retry_at && (int32_t)(now-away_retry_at)<0)) return;
+    unsigned c=o->assignment.character[local_seat]; if(c>=4u) return;
+    uint32_t floor=presence.ack_request[local_seat];
+    if(floor<o->last_request[local_seat]) floor=o->last_request[local_seat];
+    if(story_next_request<floor) story_next_request=floor;
+    if(story_next_request==UINT32_MAX) return;
+    SudekiMpLanPartyCommand command={.request=++story_next_request,.world=o->assignment.world,
+        .revision=o->assignment.revision,.generation=o->assignment.generation[c],
+        .kind=SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,.player=(uint8_t)local_seat,.target=4,
+        .value=away_client.want_away?SUDEKIMP_LAN_PARTY_PRESENCE_AWAY:0};
+    if(SudekiMpLanPartyQueueCommand(session,&command)) { away_pending_request=command.request; away_retry_at=0; }
+    else away_retry_at=now+250u;
+}
 static BOOL service_quick_menu(const SudekiMpLanStoryNativeRoster *r,
     const SudekiMpLanStoryScene *scene,void *unused) {
     (void)unused;
@@ -2426,19 +2579,23 @@ static BOOL service_quick_menu(const SudekiMpLanStoryNativeRoster *r,
         presentation_fresh(now,presentation_sample.receipt);
     BOOL toggle=owned && SudekiMpLanStoryInputTakeQuickMenu(r->controller,
         r->actors[r->leader_character],client_control_fence.transaction);
-    /* #75: the client's own M press opens the native Main Menu over its own
-     * inventory; the adapter scopes it to this player's character. */
+    away_note_ui(now);
+    if(toggle) (void)SudekiMpLanStoryInputTakeMainMenuRaw();
     if(main_menu_attempted && !toggle) {
         BOOL pressed=SudekiMpLanStoryInputTakeMainMenu(r->controller,r->actors[r->leader_character],client_control_fence.transaction);
-        if(main_menu_open()) { static BOOL last_owned=TRUE; static DWORD at; DWORD t=GetTickCount();
-            if(pressed || owned!=last_owned || t-at>=2000u) { last_owned=owned; at=t;
-                SudekiMpLogFormat("story_main_menu event=menu_input owned=%u admitted=%u pressed=%u input_ready=%u\r\n",
-                    (unsigned)owned,(unsigned)admitted,(unsigned)pressed,(unsigned)client_input_ready); } }
-        /* Open only here; closing/back is the focus-gated raw path in the
-         * client dispatch, so one press never delivers twice. */
-        if(pressed && !SudekiMpLanStoryMainMenuVisible() && owned && admitted &&
+        if(story_step_away) {
+            pressed=SudekiMpLanStoryInputTakeMainMenuRaw() || pressed;
+            if(pressed) {
+                SudekiMpLanPartyPeerStatus current={0};
+                BOOL mine=client_local_selected && r->leader_character==SudekiMpLanPartyLocalCharacter(session);
+                BOOL live=SudekiMpLanPartyPeerStatusGet(session,local_seat,&current) &&
+                    current.transport_confirmed && current.phase==SUDEKIMP_LAN_PARTY_OBSERVING;
+                away_m_decision(mine,live,now);
+            }
+        } else if(pressed && !SudekiMpLanStoryMainMenuVisible() && owned && admitted &&
             SudekiMpLanStoryMainMenuRequestOpen()) (void)SudekiMpLanStoryInputTakeMainMenuRaw();
     }
+    if(away_client.phase!=SUDEKIMP_STORY_AWAY_NONE) { owned=admitted=toggle=FALSE; }
     return SudekiMpLanStoryQuickMenuService(r,client_control_fence.transaction,owned,admitted,toggle);
 }
 /* Retain only an ALREADY armed binding through another character's split
@@ -2564,6 +2721,14 @@ static void service_client_control(void *controller,const SudekiMpControlUpdateD
     SudekiMpLanStoryControlState state;
     uint32_t now=GetTickCount();
     unsigned chosen=SudekiMpLanPartyLocalCharacter(session);
+    BOOL away_look=story_step_away && away_client.phase!=SUDEKIMP_STORY_AWAY_NONE &&
+        client_local_selected && chosen<4u && !SudekiMpLanStoryMenuCapturesInput() &&
+        !SudekiMpLanStoryQuickMenuCapturesInput() && !main_menu_open() && !shop_open();
+    SudekiMpLanStoryNativeRoster away_roster;
+    if(away_look && SudekiMpLanStoryObserverRoster(controller,w,native,&away_roster) &&
+        away_roster.leader_character==chosen)
+        (void)SudekiMpLanStoryInputAwayLook(controller,away_roster.actors[chosen],TRUE);
+    else (void)SudekiMpLanStoryInputAwayLook(NULL,NULL,FALSE);
     BOOL offered=chosen<4u &&
         SudekiMpLanPartyPeerStatusGet(session,local_seat,&peer) &&
         peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
@@ -2574,7 +2739,7 @@ static void service_client_control(void *controller,const SudekiMpControlUpdateD
         state.fence.character==chosen && presented_epoch==state.fence.epoch &&
         presented_generations[chosen]==state.fence.actor_generation;
     client_input_ready=FALSE;
-    if(!offered) {
+    if(!offered || away_client.want_away) {
         SudekiMpLanStoryInputClear();
         service_client_action(NULL,NULL,now);
         /* An offer gap closes input, but does not undo the completed view
@@ -2634,7 +2799,7 @@ static void service_client_control(void *controller,const SudekiMpControlUpdateD
                 &discarded_held,&discarded_press)) client_ranged_physical_press=discarded_press;
             (void)SudekiMpLanStoryInputTakeQuickMenu(controller,roster.actors[chosen],state.fence.transaction);
             (void)SudekiMpLanStoryInputTakeMainMenu(controller,roster.actors[chosen],state.fence.transaction);
-            (void)SudekiMpLanStoryInputTakeMainMenuRaw();
+            if(away_client.phase==SUDEKIMP_STORY_AWAY_NONE) (void)SudekiMpLanStoryInputTakeMainMenuRaw();
             static uint32_t traced_epoch,traced_revision;
             static unsigned traces;
             if(traces<64u && (traced_epoch!=remote.epoch || traced_revision!=remote.revision)) {
@@ -2825,6 +2990,7 @@ static void menu_frame(void) {
             {
                 static DWORD menu_seen_at,shop_seen_at; DWORD t=GetTickCount();
                 BOOL shown=main_menu_attempted && SudekiMpLanStoryMainMenuVisible(),shop=shop_open();
+                away_note_ui(t);
                 if(shown) menu_seen_at=t;
                 if(shop) shop_seen_at=t;
                 if(main_menu_attempted || shop_attempted)
@@ -2884,6 +3050,8 @@ static void menu_frame(void) {
         }
         if(!main_menu_open()) SudekiMpLanStoryNameTagsRender(*slot); /* no world behind the client's menu */
         (void)SudekiMpLanStoryMenuRender(*slot);
+        if(local_seat && story_step_away)
+            (void)SudekiMpStoryAwayBannerRender(game_base,*slot,away_client.phase,SudekiMpLanPartyLocalCharacter(session));
         unsigned prompt_choice;
         if(local_seat && SudekiMpLanStoryMainMenuPrompt(&prompt_choice)) {
             BOOL ok=SudekiMpPartyMenuRenderConfirm(*slot,"Use this item on yourself?",prompt_choice);
@@ -3345,9 +3513,15 @@ static void service(void *controller,void *data,
         LARGE_INTEGER control_start=timing_begin();
         service_story_ownership(controller,w,&native);
         service_story_controls(controller,w,&native);
+        (void)publish_story_ownership();
         timing_end(&control_service_timing,control_start);
     }
+    if(local_seat && saved_profile && !known) {
+        client_input_ready=FALSE;
+        (void)SudekiMpLanStoryInputAwayLook(NULL,NULL,FALSE);
+    }
     if(local_seat && saved_profile && known) service_client_control(controller,w,&native);
+    if(saved_profile && local_seat) service_step_away();
     now=GetTickCount(); /* Host control may have required a fresh observation. */
     if(shots_attempted && (!known || native.phase!=SUDEKIMP_LAN_STORY_READY))
         SudekiMpLanStoryShotsCloseAdmission();
@@ -3596,6 +3770,8 @@ BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig 
     saved_profile=config->story_observation==2u; runtime_thread=0;
     story_policy_initialized=story_key_focused=story_key_down=FALSE;
     story_next_request=story_pending_request=0; story_swap_traces=0;
+    memset(&away_client,0,sizeof(away_client)); memset(&away_combat,0,sizeof(away_combat));
+    memset(&away_connection,0,sizeof(away_connection)); away_pending_request=away_retry_at=away_ui_at=0; away_ui_seen=FALSE;
     memset(&story_presence,0,sizeof(story_presence)); memset(&story_published,0,sizeof(story_published));
     timing_frequency.QuadPart=0; (void)QueryPerformanceFrequency(&timing_frequency);
     previous_controller_stamp.QuadPart=0;
@@ -3715,6 +3891,7 @@ BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig 
             if(!SudekiMpLanStoryHostControlInstall(module,config->character[0])) goto fail;
             control_attempted=TRUE;
             if(!SudekiMpLanStoryControlInstall(module,config->character[0])) goto fail;
+            if(story_step_away && !SudekiMpLanStoryHostPauseInstall(module)) goto fail;
             activity_attempted=TRUE;
             if(!SudekiMpLanStoryActivityInitialize(module)) goto fail;
             split_attempted=TRUE;
@@ -3835,6 +4012,7 @@ static BOOL retire_runtime(BOOL exit_to_title) {
         split_attempted=FALSE;
         if(activity_attempted && !SudekiMpLanStoryActivityUninstall()) return retain_module();
         activity_attempted=FALSE;
+        if(!SudekiMpLanStoryHostPauseUninstall()) return retain_module();
         if(control_attempted && !SudekiMpLanStoryControlUninstall()) return retain_module();
         control_attempted=FALSE;
         if(host_attempted && !SudekiMpLanStoryHostControlUninstall()) return retain_module();
