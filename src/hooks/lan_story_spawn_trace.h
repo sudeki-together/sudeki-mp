@@ -17,6 +17,15 @@ BOOL SudekiMpLanStorySpawnTick(uint32_t now,BOOL client);
 BOOL SudekiMpLanStorySpawnEventsCapture(SudekiMpStoryEffectState *out);
 BOOL SudekiMpLanStorySpawnEventsFollow(const SudekiMpStoryEffectState *host);
 BOOL SudekiMpLanStorySpawnIdentity(const void *monster,uint32_t *identity);
+/* Borrowed lease observations, game thread only; FALSE means unknown.
+ * No partial enumeration and no actor pointer may outlive the call. */
+typedef struct SudekiMpStorySpawnLeaseObservation {
+    uint32_t serial,resource,group_id;
+    char group[SUDEKIMP_STORY_AREA_NAME];
+    void *actor;
+    BOOL departed;
+} SudekiMpStorySpawnLeaseObservation;
+BOOL SudekiMpLanStorySpawnLeasesObserve(SudekiMpStorySpawnLeaseObservation *out,unsigned capacity,unsigned *count);
 /* Host death state and observed authored emission; client presents it once
  * per leased occurrence. Native death/loot and final removal stay separate. */
 BOOL SudekiMpLanStorySpawnDeathState(const void *monster,BOOL *dead,unsigned *emitted);

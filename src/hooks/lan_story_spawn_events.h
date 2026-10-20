@@ -101,6 +101,27 @@ static BOOL spawn_event_identity(const void *actor,uint32_t *id) {
     if(!found) return FALSE;
     *id=found->state.serial;return TRUE;
 }
+BOOL SudekiMpLanStorySpawnLeasesObserve(SudekiMpStorySpawnLeaseObservation *out,unsigned capacity,unsigned *count) {
+    if(!out || !count || client_role || !spawn_event_thread ||
+        spawn_event_thread!=GetCurrentThreadId() || !spawn_event_begin()) return FALSE;
+    unsigned needed=0;
+    for(unsigned i=0;i<SPAWN_EVENT_SLOTS;++i) {
+        SpawnEventLease *e=&spawn_events[i];if(!e->used) continue;
+        if(!gate_weak_exact(&e->group) || !gate_weak_exact(&e->actor) ||
+            (e->actor.object && !e->departed && !spawn_event_actor(e))) return FALSE;
+        ++needed;
+    }
+    if(needed>capacity) return FALSE;
+    unsigned n=0;
+    for(unsigned i=0;i<SPAWN_EVENT_SLOTS;++i) {
+        SpawnEventLease *e=&spawn_events[i];if(!e->used) continue;
+        SudekiMpStorySpawnLeaseObservation v={0};
+        v.serial=e->state.serial;v.resource=e->state.resource;v.group_id=e->state.group_id;
+        memcpy(v.group,e->state.group,sizeof(v.group));v.group[sizeof(v.group)-1]=0;
+        v.actor=e->actor.object;v.departed=e->departed;out[n++]=v;
+    }
+    *count=n;return TRUE;
+}
 /* A receipt comes from the existing 4E2810 observer after native emission,
  * not from HP=0 or a guessed delay. Resolve only the exact leased monster's
  * independent authored death resource; unrelated effects cannot arm it. */

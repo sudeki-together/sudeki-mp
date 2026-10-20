@@ -6842,6 +6842,62 @@ Mutation validation: **64 of 64 targeted guard mutations rejected** — 34 pure-
 
 All live outcomes above remain **UNKNOWN**. Stage 2 spectating, host step-away, party pause, client cluster following, and AI skill/Spirit use remain out of scope. No commit is authorized by this task.
 
+### 2026-10-19 — Enemy tier 0 review: busy-client classification and evidence
+
+Implemented Parts A–D of `enemy-ai-review-tier0.md` in the existing dirty
+`codex/shared-simulation` worktree on `fa50351`. The extracted runtime mapping
+now uses packet `heard_at`, treats `held` only as missing lease proof and keeps
+the receipt-0 sentinel stale. The new busy-client regression failed as AI before
+the correction and passes as REMOTE afterward. The classifier and dead-lead
+hold logic remain unchanged.
+
+Added exact-roster Service coverage, real worker-thread admission/removal checks,
+log throttle/budget/count and INI assertions, and failed-restore quarantine
+checks. Lead logs distinguish substitutions from proposed target changes;
+type logs and selection budgets survive report flushes/stalls until namespace
+reset. AWAY refusal statistics are included. Pinned the cap helper's stack ABI
+and aligned S1/Defend modal wording with the accepted implementation. No refuted
+finding, higher tier, Attack/Retreat/formation, host-kick or unload-policy work
+was taken on.
+
+Flatpak build, four focused Wine tests, native C11 policy test and the full
+222-invocation sweep completed: baseline 218 passes; post-change 217 initially,
+then LauncherTabs passed with an isolated temporary directory after its
+PID-named fixture collided. The same four controller/harness-dependent
+non-pass results remain. See the
+[review evidence and limitations](testing.md#enemy-targeting-tier-0-review-corrections--2026-10-19)
+for the DLL hash, fail-before proof and exact test coverage. Evidence remains
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE, plus the documented CONFIRMED_STATIC
+filter observation. No commit, deployment or live validation. The owner retains
+the busy-body/KO/away-return/separation/rejoin/teardown live gate.
+
+### 2026-10-19 — #97 away-menu diagnostic, then enemy tiers 1/1.5/2
+
+Implemented Parts 0–D of `enemy-ai-tier12-task.md` in the existing dirty
+`codex/shared-simulation` worktree on `fa50351`, without committing.
+Part 0 was built, tested and preserved separately before tier work: the away
+proof no longer depends directly on the host Esc menu, retains one named-refusal
+body, and emits bounded reason-change diagnostics. CompanionSeatExact keeps
+its own menu guard. The owner still reruns the last-away menu-open/closed case;
+this entry does not establish that the observed status flapping has ended.
+
+Tiers 1/1.5/2 now have plain-data threat/alert/push policy and host adapter feeds,
+serial-based lifecycle, independent live/shadow sets, direct filter rechecks,
+per-rule counters and bounded events. Already accepted decisions 10 and 11
+remain human-only higher picks and one active alert per shooter per set,
+including orphan copies. Idle tracking resets on unknown frames and service
+gaps; its own engager does not prematurely end a pushed enemy's hold.
+Mode 0xE remains diagnostic-only. No tier 3, bark, client, Attack/Retreat,
+formation, host-kick or native state-write expansion was made.
+
+The documented Flatpak build, native C11 policy check and four focused Wine
+checks pass; full-suite outcome, both DLL hashes and detailed evidence scopes
+are in [the testing record](testing.md#enemy-targeting-away-menu-diagnostic-and-tiers-1152--2026-10-19). Multi-lease Service and
+selector fixtures are CONFIRMED_TEST with synthetic list/world filtering;
+retained native byte/ABI/cap contracts reach CONFIRMED_EXACT_IMAGE. Earlier
+hash-pinned testing entries are preserved with superseding pointers. No live
+behavior is claimed; ordered owner gates follow tier 0 acceptance.
+
 ## 10. Remaining work (owner review 2026-10-15; states refreshed 2026-10-18; research digests in `coop-story-research-54.md`)
 
 Against the original phases, with the #54 route (castle road ↔ New
@@ -6858,6 +6914,7 @@ Brightwater, Ailish host / Tal client) as the yardstick:
 | F1 client cluster follows the host (combat state) | Not started. The host publishes its cluster hash, sector, in-combat and suspension flags (CONFIRMED_STATIC), but no client code reads them; live, the client stays on Town_Cluster and never enters combat while the host fights (CONFIRMED_LIVE) | Close the static gates (no listener connect/disconnect or leader-sector access inside 0x4352D0; the spawn-row journal for the cluster broadcast), then one default-off adapter in lan_story_client.c on 0x43513B (0x4CF655 as a safety net) feeding the host sector, after owner decisions on scope and presentation. Research: [F1](coop-story-research-54.md) |
 | F2 spectator camera for downed players (D3) | Not started: nothing detects a downed member (native bit 0x10000) or moves a downed player's camera. The native downed, revive and lead-camera paths are mapped (CONFIRMED_STATIC); host-down, client-down and the 1 HP revive are in private logs of older builds (CONFIRMED_LIVE); what the downed player sees is INFERENCE | Owner decisions (cycle key, start view, host half now or in G, downed field or HP proxy, other-area members, #80 precedence); then a party-frame downed state, a pure cycle state machine and the client retarget adapter on the 0x7C2F30 target list, with exact-image tests and an owner gate. Research: [F2](coop-story-research-54.md) |
 | G lead vs ownership | Not started. The death/lead hold still keeps a downed or scripted-pending lead in slot 0; every module assumes host = native lead = controller target (CONFIRMED_STATIC); the native lead-change path 0x4237B0 is mapped (CONFIRMED_STATIC); enemies idle while the host is down (CONFIRMED_LIVE) | Close the static gates (slot-0 vs controller reader census, camera re-install after cinematics, client-side rotations); then the host_character model split with pure tests, one 0x4237B0 lead-only adapter with an image test, then retire the hold. Owner decisions: lead return, D11/D12 scope, pad switching. Research: [G](coop-story-research-54.md) |
+| **Co-op enemy AI (#97)** | Dirty `fa50351` candidate implements watch, tier 0 cap/Lead-PC fallback and companion Defend, plus human-only threat, capped per-shooter alerts and idle pushes. Separate shadow state and bounded lifecycle diagnostics; away proof no longer depends directly on host Esc. Policy and supported-image fixtures pass; live behavior remains UNKNOWN | Owner reruns last-away Esc open/closed, completes tier 0 gate, then enables tiers 1/1.5/2 in order and compares would_* at tier 0. Mode 0xE stays native; no AwareForceIn weight edits, tier 3 or bark. See [current evidence](testing.md#enemy-targeting-away-menu-diagnostic-and-tiers-1152--2026-10-19) and `enemy-ai-tier12-task.md` |
 | **H interactions (D4, D11, D12)** | Chests (H1a): Tal opens a chest under a scoped front; one clean open accepted live; remote control during the host's own open/smash CONFIRMED_TEST. Shop doors (H1b, Kamo only): Tal enters and leaves alone, both see each other inside, the lead entering with Tal inside reloads the house without the hang (live). Tal's own Kamo shop and talk, speech camera, Kamo turning and the farewell hold (live); line gestures behind a default-off switch (live UNKNOWN). Rejoin at Tal's spot, steering through the lead's door script, host Kamo talk kept off clients: CONFIRMED_TEST | Live checks of the CONFIRMED_TEST H1b items and the gesture check; #85 host-side fade and #86 lead exit keeping members inside (rows below); #82, #67 follow-up, #83; the farmhouse sword chest and more shops, and the D12 stages S0–S4: rows below |
 | H remaining: farmhouse sword chest against D11, more shops in the door table | Door and shopkeeper tables hold only LNBr_Kamo_shop; the castle Kamo is out only by absence and only the keeper table has a pure test (CONFIRMED_STATIC). The remote chest open is accepted once outdoors (CONFIRMED_LIVE); the farmhouse sword chest sits in a lead-only story house (D11) whose one native take-along froze the client, never retested | Owner picks the first chest gate (remote farmhouse entry with the lead inside, native take-along, or accept the outdoor open), which inns join, and the castle Kamo rule; meanwhile a pure barred-house list and door-table test, then G1 on a save with the chest still closed. Research: [H1rest](coop-story-research-54.md) |
 | D12 S0: host conversations private beyond shopkeepers | Only Kamo's talk is kept off clients: the host checks each line's speaker against the shopkeeper table (CONFIRMED_TEST); host classification and the client's idle receipt are CONFIRMED_LIVE in logs, the owner check is open. Every other host conversation reaches clients with text and voice (CONFIRMED_STATIC) | Owner decisions: how story scenes are detected (bars only, or bars plus a story-NPC table) and the default when classification fails. Then a pure per-conversation classifier with listener and span-marker reads, a research build logging participant names (G1/G3), and an owner check with Tal's own talk closed. Research: [S0priv](coop-story-research-54.md) |

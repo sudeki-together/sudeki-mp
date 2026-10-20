@@ -20,4 +20,5 @@ BOOL SudekiMpLanStoryShotsAim(const SudekiMpControlUpdateDispatchWitness *w,
 BOOL SudekiMpLanStoryShotsAppendVisuals(const SudekiMpLanStoryNativeRoster *roster,SudekiMpStoryVfx *state);
 void SudekiMpLanStoryShotsCloseAdmission(void);
 BOOL SudekiMpLanStoryShotsUninstall(void);
+BOOL SudekiMpLanStoryShotsLatest(unsigned character,uint32_t *sequence,uint32_t *tick);
 #endif

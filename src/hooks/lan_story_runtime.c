@@ -9,6 +9,7 @@
 #include "hooks/lan_story_xp.h"
 #include "hooks/lan_story_spawn_trace.h"
 #include "hooks/lan_story_death_hold.h"
+#include "hooks/story_enemy_targeting.h"
 #include "hooks/lan_story_sky.h"
 #include "hooks/lan_story_music.h"
 #include "hooks/lan_story_character_audio.h"
@@ -282,6 +283,8 @@ static SudekiMpLobbyStatus menu_lobby;
 static SudekiMpLanStoryScene menu_scene;
 static uint64_t story_lobby_tickets[4];
 static DWORD runtime_thread,last_present_trace,last_received_frame;
+static BOOL enemy_targeting_attempted;
+static struct {BOOL known;uint32_t epoch,revision;unsigned count,last[4];} away_refused_logs;
 enum { STORY_HISTORY_CAPACITY=8 };
 static SudekiMpLanStoryFrame history[STORY_HISTORY_CAPACITY];
 static uint32_t history_receipts[STORY_HISTORY_CAPACITY];
@@ -1561,6 +1564,50 @@ BOOL SudekiMpLanStoryRuntimeAiLeaseExact(const SudekiMpLanPartyLease *key) {
      * its client prepares input. It does not authorize player steering. */
     return runtime_control_lease_exact(key,FALSE);
 }
+enum SudekiMpLanStoryRuntimeAwaySeatRefusal SudekiMpLanStoryRuntimeAwaySeatRefusal(
+    unsigned c,const SudekiMpLanPartyLease *connection) {
+    if(c>=4 || !connection || !connection->token) return STORY_AWAY_REFUSAL_INVALID_ARGUMENT;
+    if(!session || !saved_profile || !control_attempted || !story_policy_initialized) return STORY_AWAY_REFUSAL_NOT_INITIALIZED;
+    if(local_seat) return STORY_AWAY_REFUSAL_CLIENT_SEAT;
+    if(!runtime_thread || runtime_thread!=GetCurrentThreadId()) return STORY_AWAY_REFUSAL_THREAD;
+    if(InterlockedCompareExchange(&stopping,0,0)) return STORY_AWAY_REFUSAL_STOPPING;
+    if(!host_binding_ready) return STORY_AWAY_REFUSAL_BINDING_NOT_READY;
+    /* Host menus do not remove combat pressure from a released away body.
+     * CompanionSeatExact independently retains its accepted modal guard. */
+    const SudekiMpPartyOwnership *o=&story_presence.ownership;
+    unsigned p=SudekiMpPartyCharacterOwner(&o->assignment,c);
+    if(!p || p>=4) return STORY_AWAY_REFUSAL_NOT_OWNER;
+    if(o->phase!=SUDEKIMP_PARTY_SWAP_IDLE) return STORY_AWAY_REFUSAL_SWAP_PHASE;
+    if(!(o->connected&(1u<<p))) return STORY_AWAY_REFUSAL_NOT_CONNECTED;
+    if(!(o->away&(1u<<p))) return STORY_AWAY_REFUSAL_NOT_AWAY;
+    if(o->control[p]!=SUDEKIMP_PARTY_CONTROL_AI) return STORY_AWAY_REFUSAL_CONTROL_NOT_AI;
+    if(host_control[p].native_key.token) return STORY_AWAY_REFUSAL_NATIVE_KEY_RETAINED;
+    if(host_control[p].acquired) return STORY_AWAY_REFUSAL_ACQUIRED;
+    if(host_control[p].draining) return STORY_AWAY_REFUSAL_DRAINING;
+    if(SudekiMpLanPartyPlayerCharacter(session,p)!=c) return STORY_AWAY_REFUSAL_CHARACTER_MISMATCH;
+    SudekiMpLanPartyPeerStatus peer={0};
+    if(!SudekiMpLanPartyPeerStatusGet(session,p,&peer)) return STORY_AWAY_REFUSAL_PEER_STATUS;
+    if(peer.phase!=SUDEKIMP_LAN_PARTY_OBSERVING) return STORY_AWAY_REFUSAL_PEER_PHASE;
+    if(!peer.transport_confirmed) return STORY_AWAY_REFUSAL_TRANSPORT;
+    if(!same_connection(connection,&peer.lease)) return STORY_AWAY_REFUSAL_CONNECTION_MISMATCH;
+    return STORY_AWAY_REFUSAL_NONE;
+}
+BOOL SudekiMpLanStoryRuntimeAwaySeatExact(unsigned c,const SudekiMpLanPartyLease *connection) {
+    return SudekiMpLanStoryRuntimeAwaySeatRefusal(c,connection)==STORY_AWAY_REFUSAL_NONE;
+}
+BOOL SudekiMpLanStoryRuntimeCompanionSeatExact(unsigned c) {
+    if(c>=4 || !session || !saved_profile || !control_attempted || local_seat ||
+        !story_policy_initialized || !runtime_thread || runtime_thread!=GetCurrentThreadId() ||
+        InterlockedCompareExchange(&stopping,0,0) || !host_binding_ready ||
+        SudekiMpLanStoryMenuCapturesInput() || story_presence.ownership.phase!=SUDEKIMP_PARTY_SWAP_IDLE)
+        return FALSE;
+    if(!(story_presence.ownership.assignment.available&(1u<<c))) return FALSE;
+    unsigned p=SudekiMpPartyCharacterOwner(&story_presence.ownership.assignment,c);
+    if(p>=4) return TRUE;
+    SudekiMpLanPartyPeerStatus peer={0};
+    return p && SudekiMpLanPartyPeerStatusGet(session,p,&peer) &&
+        SudekiMpLanStoryRuntimeAwaySeatExact(c,&peer.lease);
+}
 static void observe_recruitment(const SudekiMpLanStoryScene *scene,const SudekiMpLanStoryFrame *frame,
     void *controller,const SudekiMpControlUpdateDispatchWitness *w) {
     if(scene->available_mask==4u && scene->leader_seat==2u) {
@@ -1933,6 +1980,55 @@ static void host_control_masks(const SudekiMpControlUpdateDispatchWitness *w,
         if(host_control[p].ready) *activity_mask|=1u<<c;
     }
 }
+/* Translate current runtime ownership and input evidence for one character.
+ * No native writes; the caller supplies its already-proven roster/witness. */
+static void enemy_targeting_seat(unsigned c,const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *r,SudekiMpStoryThreatSeat *seat,
+    unsigned *firing,SudekiMpLanPartyLease *away_key,BOOL *coop,uint32_t now) {
+    if(r && (!away_refused_logs.known || away_refused_logs.epoch!=r->epoch || away_refused_logs.revision!=r->revision)) {
+        memset(&away_refused_logs,0,sizeof(away_refused_logs));away_refused_logs.known=TRUE;
+        away_refused_logs.epoch=r->epoch;away_refused_logs.revision=r->revision;
+        for(unsigned i=0;i<4;++i) away_refused_logs.last[i]=STORY_AWAY_REFUSAL_NONE;
+    }
+    memset(seat,0,sizeof(*seat));*firing=0;memset(away_key,0,sizeof(*away_key));
+    seat->max_age=SUDEKIMP_LAN_PARTY_INPUT_MAX_AGE_MS;
+    seat->absent=SudekiMpLanStoryRemoteInteriorMemberParked(c);
+    unsigned p=SudekiMpPartyCharacterOwner(&story_presence.ownership.assignment,c);
+    if(p>=4) {seat->owned_ai=c!=(r?r->leader_character:0);return;}
+    seat->away=(story_presence.ownership.away&(1u<<p))!=0;
+    seat->owned_ai=story_presence.ownership.control[p]==SUDEKIMP_PARTY_CONTROL_AI;
+    if(!p) return;
+    SudekiMpLanPartyPeerStatus peer={0};
+    seat->connected=SudekiMpLanPartyPeerStatusGet(session,p,&peer) &&
+        peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING && peer.transport_confirmed;
+    unsigned refusal=STORY_AWAY_REFUSAL_NONE;
+    if(seat->connected && seat->away) {
+        refusal=SudekiMpLanStoryRuntimeAwaySeatRefusal(c,&peer.lease);
+        if(refusal==STORY_AWAY_REFUSAL_NONE) {*away_key=peer.lease;*coop=TRUE;}
+        else if(refusal!=away_refused_logs.last[c] && away_refused_logs.count<64) {
+            static const char *const reasons[]={"invalid_argument","not_initialized","client_seat","thread","stopping","binding_not_ready","menu_captures","not_owner","swap_phase","not_connected","not_away","control_not_ai","native_key_retained","acquired","draining","character_mismatch","peer_status","peer_phase","transport","connection_mismatch","none"};
+            ++away_refused_logs.count;
+            SudekiMpLogFormat("story_enemy_targeting event=away_refused seat=%u reason=%s\r\n",c,reasons[refusal]);
+        }
+    }
+    away_refused_logs.last[c]=refusal;
+    BOOL lease=r && host_control[p].acquired && host_control[p].native_key.seat==c &&
+        same_connection(&peer.lease,&host_control[p].connection) &&
+        SudekiMpLanStoryControlExact(w,r,&host_control[p].native_key);
+    seat->ready=lease && host_control[p].ready &&
+        story_presence.ownership.control[p]==SUDEKIMP_PARTY_CONTROL_HUMAN;
+    seat->draining=host_control[p].draining;
+    /* A host-side busy-body hold is not client silence. Packet receipt
+     * remains fresh while movement application is held. 1 encodes receipt 0. */
+    seat->held=!lease;
+    seat->receipt=host_control[p].heard_at==1u?0:host_control[p].heard_at;
+    /* Saved-story uses its own accepted ranged intent, whose held
+     * bit already combines first-person aim and weak attack. */
+    *firing=host_control[p].ranged_at &&
+        (uint32_t)(now-host_control[p].ranged_at)<=SUDEKIMP_LAN_PARTY_INPUT_MAX_AGE_MS &&
+        SudekiMpLanStoryControlFenceSame(&host_control[p].ranged.fence,&host_control[p].fence) &&
+        host_control[p].ranged.held;
+}
 static void service_story_controls(void *controller,const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryScene *scene) {
     if(!control_attempted) return;
@@ -1942,10 +2038,11 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
     SudekiMpLanStoryControlObserveIdleContact(w,known?&roster:NULL);
     refresh_split_eligibility(w,scene,known?&roster:NULL);
     uint32_t now=GetTickCount();
+    BOOL remote=FALSE;
     {   /* Away peers cease to keep the dead-lead hold armed after native
          * release. Until then a retained lease still needs its original lead
          * identity to finish draining; dropping that hold early strands it. */
-        BOOL remote=FALSE; void *remote_actors[3]={0};
+        void *remote_actors[3]={0};
         for(unsigned p=1;p<4u;++p) {
             SudekiMpLanPartyPeerStatus peer={0}; unsigned c=SudekiMpLanPartyPlayerCharacter(session,p);
             if(SudekiMpLanPartyPeerStatusGet(session,p,&peer) && peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
@@ -2280,6 +2377,15 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
         (void)SudekiMpLanPartyPublishStoryActionResult(session,&host_control[p].connection,&result);
         SudekiMpLogFormat("story_cast event=request_result player=%u character=%u request=%lu kind=%u slot=%u outcome=%u\r\n",
             p,request.fence.character,(unsigned long)request.request,request.kind,request.slot,outcome);
+    }
+    if(enemy_targeting_attempted) {
+        SudekiMpStoryThreatSeat seats[4]={{0}};unsigned firing[4]={0};
+        SudekiMpLanPartyLease away_keys[4]={{0}};BOOL enemy_coop=remote;
+        for(unsigned c=0;c<4;++c)
+            enemy_targeting_seat(c,w,known?&roster:NULL,&seats[c],&firing[c],&away_keys[c],&enemy_coop,now);
+        /* Away AI keeps normal combat pressure after its input lease drains.
+         * The dead-lead hold above still uses its original remote predicate. */
+        SudekiMpStoryEnemyTargetingService(known?&roster:NULL,scene,seats,firing,away_keys,enemy_coop,now);
     }
 }
 static void service_client_recruitment(void) {
@@ -3370,12 +3476,21 @@ static void service(void *controller,void *data,
         !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)) goto done;
     if(!runtime_thread) runtime_thread=GetCurrentThreadId();
     if(runtime_thread!=GetCurrentThreadId()) goto done;
+    if(enemy_targeting_attempted) {
+        SudekiMpStoryEnemyTargetingSuspend();
+        if(!InterlockedCompareExchange(&stopping,0,0) &&
+            !SudekiMpStoryEnemyTargetingBindThread(runtime_thread)) goto done;
+    }
     if(saved_profile && !local_seat) {
         controller_start=timing_begin();
         timing_end(&controller_gap_timing,previous_controller_stamp);
         previous_controller_stamp=controller_start;
     }
     if(InterlockedCompareExchange(&stopping,0,0)) {
+        if(enemy_targeting_attempted) {
+            if(!SudekiMpStoryEnemyTargetingUninstall()) goto done;
+            enemy_targeting_attempted=FALSE;memset(&away_refused_logs,0,sizeof(away_refused_logs));
+        }
         /* Native inventory hooks and callbacks retire on their bound game
          * thread; the heap journal remains until the service gate drains. */
         if(!SudekiMpLanStoryInventoryUninstall()) goto done;
@@ -3899,6 +4014,8 @@ BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig 
             (void)SudekiMpLanStoryObserverSetWorldChangeHook(before_world_change);
             shots_attempted=TRUE;
             if(!SudekiMpLanStoryShotsInstall(module)) goto fail;
+            enemy_targeting_attempted=TRUE;
+            if(!SudekiMpStoryEnemyTargetingInstall(module)) goto fail;
         }
     }
     if(saved_profile && local_seat) {
@@ -3963,6 +4080,8 @@ static BOOL retire_runtime(BOOL exit_to_title) {
     if(client_camera_attempted && !SudekiMpLanStoryClientCameraUninstall()) return retain_module();
     client_camera_attempted=FALSE;
     unsigned exited=saved_profile?SudekiMpLobbyGameplayStoryExitStatus():0u;
+    if(enemy_targeting_attempted && !SudekiMpStoryEnemyTargetingUninstall()) return retain_module();
+    enemy_targeting_attempted=FALSE;memset(&away_refused_logs,0,sizeof(away_refused_logs));
     if(shots_attempted && !SudekiMpLanStoryShotsUninstall()) return retain_module();
     shots_attempted=FALSE;
     if(shop_attempted && !SudekiMpLanStoryShopUninstall()) return retain_module();

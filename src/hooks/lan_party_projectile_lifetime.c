@@ -660,3 +660,37 @@ BOOL SudekiMpLanPartyProjectileLifetimeUninstall(void) {
     construct_original=update_original=terminate_original=NULL;
     return leave(TRUE,0);
 }
+
+BOOL SudekiMpLanPartyProjectileDamageMatch(void *actor,void *packet_data,BOOL *match) {
+    if(!actor || !match || !packet_data || !enter()) return FALSE;
+    if(!image || unknown || restore_failed || !native_thread || native_thread!=GetCurrentThreadId() || !hooks_exact())
+        return leave(FALSE,ERROR_INVALID_STATE);
+    /* A tagged ordinary projectile without a retained descendant namespace
+     * is unknown, not a successful empty ownership observation. */
+    for(unsigned i=0;i<JOURNAL_CAPACITY;++i) {
+        const ProjectileEntry *e=&journal[i];
+        if(!e->used || empty(&e->observer) || e->tag.actor!=actor) continue;
+        if(!e->registered || e->observer.object!=e->target || !links_exact(&e->observer))
+            return leave(FALSE,ERROR_INVALID_DATA);
+        BOOL owned=FALSE;
+        for(unsigned j=0;j<DESCENDANT_CAPACITY;++j)
+            if(descendants[j].used && descendants[j].registered && descendants[j].target==e->target &&
+                descendants[j].owner.actor==actor) {owned=TRUE;break;}
+        if(!owned) return leave(FALSE,ERROR_INVALID_STATE);
+    }
+    BOOL found=FALSE;
+    for(unsigned i=0;i<DESCENDANT_CAPACITY;++i) {
+        const ProjectileDescendant *e=&descendants[i];
+        if(!e->used || empty(&e->observer) || e->owner.actor!=actor) continue;
+        if(!e->registered || !namespace_valid(&e->owner) || e->observer.object!=e->target || !links_exact(&e->observer))
+            return leave(FALSE,ERROR_INVALID_DATA);
+        uint8_t *missile=(uint8_t *)e->target-4;
+        if(!memory(missile,0x40,FALSE) || *(void **)missile!=image+MISSILE_VT ||
+            *(void **)(missile+0x10)!=e->entity) return leave(FALSE,ERROR_INVALID_DATA);
+        uint8_t *data=*(uint8_t **)(missile+0x3c);
+        if(!memory(data,0x5c,FALSE)) return leave(FALSE,ERROR_INVALID_DATA);
+        void *value=(*(uint32_t *)(data+0x54)&0x80000000u)?data+0x58:*(void **)(data+0x58);
+        if(value==packet_data) found=TRUE;
+    }
+    *match=found;return leave(TRUE,0);
+}

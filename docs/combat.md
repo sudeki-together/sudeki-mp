@@ -188,7 +188,14 @@ No `DoDirectDamage|N`, `ModifyHitPoints|NB`, `HitEntity|PB`, or `CausePoison|PNN
 
 `CMissileManager::FireMissileScripted(int)` at RVA `0x000C89C0` selects a `MissileData` entry and launches one or more native `CMissile` objects. Initialization at RVA `0x00186E10` registers the missile's collision body through RVA `0x000EC200`. The active update at RVA `0x001867D0` advances movement and lifetime and handles ground/wall impacts; its call through RVA `0x000DCD00` creates positional impact SFX and is not character damage. Missile termination is handled at RVA `0x00186610`.
 
-Qualifying character contact reaches the collision geometry bridge at RVA `0x00032A80`, which directly calls the `CCollisionDamage` handler at RVA `0x00138870`. That handler observes the configured multiple-hit delay, constructs a `DamageStructure`, copies damage/knockback/effect/status data into it, and dispatches it through RVA `0x000DAB50`. The accepted packet reaches RVA `0x000D21D0`, where mitigation is applied, the result is clamped, and the target's current HP is written at combat-data offset `+0x2C`. This completes the native launch-to-HP chain with high confidence.
+Correction (CONFIRMED_STATIC, 2026-10-19, supported GOG image in
+`docs/executable.md`): RVA `0x32A80` → `0x138870` is boss contact damage
+(`CCollisionDamage`), not the missile collision path. Its packet reaches
+`0xDAB50` → HP receiver `0xD21D0`, but this does not complete a missile
+launch-to-HP proof. Missile initialization `0x186E10` stores the firing entity
+in `DamageStructure+0x30` at `0x18729A–0x1872AB`; the packet carries its owner
+into the shared damage receiver. See `docs/enemy-ai-task.md`, hit-feed research.
+The earlier claim conflated the boss contact and missile paths.
 
 The user-owned `SOLData.baf` serializes Plasmatica as one projectile with velocity `17.0`, range `100.0`, wall and ground collision enabled, and no penetration or bouncing. Its primary attack record has serialized base damage `500` and links to `PlasmExplosion`, whose serialized base damage is `300`. This does not establish `800` damage: the primary record says the secondary starts `Never`, and the conditions that may activate the linked attack remain unconfirmed.
 

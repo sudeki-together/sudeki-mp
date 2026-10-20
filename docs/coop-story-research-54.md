@@ -995,7 +995,13 @@ Never hook inside the hashed bodies of 0x423F60/0x424060.
 - G4 live: the HUD bar overfills when HP exceeds the local max.
 - G5 static: what 0x17E860 and the CStatDisplay+0x1B0 flag do.
 - G6 static: which deaths take 0xD1AB0.
-- G7–G10: the attacker field, quest floaties, simultaneous kills (plan:4359), and whether the popup byte persists.
+- G7 closed statically (2026-10-19): on the supported GOG image
+  (`docs/executable.md`), missile initializer 0x586E10 resets packet+0x30 to
+  the firing entity at 0x58729A–0x5872AB. The attack-area path 0x4CC150 stores
+  the casting character there too. CONFIRMED_STATIC; see the hit-feed research
+  in `enemy-ai-task.md`. Live attribution through the shared HP observer
+  remains a watch-build gate.
+- G8–G10: quest floaties, simultaneous kills (plan:4359), and whether the popup byte persists.
 
 **Owner decisions.**
 - O1: keep the native rule for co-op.

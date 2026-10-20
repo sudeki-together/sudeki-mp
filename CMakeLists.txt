@@ -120,6 +120,7 @@ add_library(SudekiMP SHARED
     src/hooks/lan_party_follow.c
     src/engine/party_follow.c
     src/hooks/lan_story_runtime.c src/hooks/lan_story_xp.c
+    src/hooks/story_enemy_targeting.c src/network/story_threat.c
     src/hooks/lan_story_load.c
     src/hooks/lan_story_task_trace.c
     src/hooks/lan_story_observer.c
@@ -2602,3 +2603,17 @@ target_include_directories(SudekiMP.StoryAwayInteriorTest PRIVATE src)
 target_compile_options(SudekiMP.StoryAwayInteriorTest PRIVATE -Wall -Wextra -Werror -UNDEBUG -fwhole-program -ffunction-sections -fdata-sections)
 target_link_options(SudekiMP.StoryAwayInteriorTest PRIVATE -Wl,--gc-sections)
 set_target_properties(SudekiMP.StoryAwayInteriorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.StoryThreatTest tests/story_threat_test.c src/network/story_threat.c)
+target_include_directories(SudekiMP.StoryThreatTest PRIVATE src)
+target_compile_options(SudekiMP.StoryThreatTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.StoryThreatTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.StoryEnemyTargetingImageTest tests/story_enemy_targeting_image_test.c
+    src/network/story_threat.c src/hooks/lan_arena_hit_feedback.c src/network/lan_arena_protocol.c
+    src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
+target_include_directories(SudekiMP.StoryEnemyTargetingImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryEnemyTargetingImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_options(SudekiMP.StoryEnemyTargetingImageTest PRIVATE -Wl,--wrap=SudekiMpInstallInlineHook -Wl,--wrap=SudekiMpInstallRelativeCallHook)
+target_link_libraries(SudekiMP.StoryEnemyTargetingImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryEnemyTargetingImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

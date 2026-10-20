@@ -1411,3 +1411,16 @@ all four roster actors and does not bypass range culling or alter gain.
 The distance regression and active-emitter movement run against the supported
 image in StoryCharacterAudioImageTest; audible acceptance is tracked in the
 plan's client-emitter correction entry.
+
+
+## Saved-story enemy candidate filter (supported image)
+
+| VA / RVA | Contract | Evidence |
+| --- | --- | --- |
+| `0x5B7120` / `0x1B7120` | Candidate eligibility and attacker-cap filter; stdcall `(request, self, float maxRange, candidate)`, boolean AL, RET16. S1 uses this invocation's candidate-list membership plus a direct recheck under the same selector scope. S2 owns only the two override-count comparisons. | CONFIRMED_STATIC: supported-image disassembly at `0x5B7120–0x5B720A` and its non-cap predicate `0x5B6EC0–0x5B7116` contains no stores to native objects or globals. Stores are stack arguments/locals only; the filter invokes the same per-candidate helpers as the native loop. This is the scoped no-store observation supporting the direct recheck, not a claim that no stack memory is written. |
+
+The cap-stub helper is explicitly `regparm(0)` because the naked S2 stubs pass
+both helper arguments on the stack. Selector output substitution still leaves
+the native state caller responsible for target commits and attacker counters.
+See [the tier 0 review brief](enemy-ai-review-tier0.md#part-d--contract-alignment-no-gameplay-change)
+and the [review validation](testing.md#enemy-targeting-tier-0-review-corrections--2026-10-19).

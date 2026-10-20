@@ -112,8 +112,77 @@ static void capture_test(void) {
     CHECK(!witness(&t));
     host_witness=NULL; original_damage=NULL; original_popup=NULL;
 }
+static unsigned entered,returned,nesting,native_damage;
+static BOOL consumer_one(void *c,void *p,BOOL after,void *storage) {
+    (void)c;(void)p;uint64_t *token=storage;
+    CHECK(!SudekiMpLanHitObserverUnsubscribe(consumer_one));
+    CHECK(!SudekiMpLanHitObserverUninstall());
+    if(!after) {*token=++entered;return TRUE;}
+    CHECK(*token==entered-returned);++returned;return TRUE;
+}
+static void __attribute__((thiscall)) nested_damage(void *c,void *p) {
+    ++native_damage;
+    if(!nesting) {nesting=1;observe_damage(c,p);nesting=0;}
+}
+static BOOL consumer_two(void *c,void *p,BOOL after,void *storage) {
+    (void)c;(void)p;(void)after;(void)storage;return TRUE;
+}
+static DWORD WINAPI observer_wrong_thread(void *unused) {
+    (void)unused;
+    CHECK(!SudekiMpLanHitObserverBindThread(GetCurrentThreadId()));
+    CHECK(!SudekiMpLanHitObserverBindThread(game_thread));
+    CHECK(!SudekiMpLanHitObserverSubscribe(consumer_two)); /* vacant slot, no duplicate */
+    CHECK(!SudekiMpLanHitObserverUnsubscribe(consumer_one));
+    CHECK(!SudekiMpLanHitObserverUninstall());return 0;
+}
+static DWORD WINAPI uninstall_wrong_thread(void *unused) {
+    (void)unused;for(unsigned i=0;i<4;++i) CHECK(!consumers[i]);
+    CHECK(!SudekiMpLanHitObserverUninstall());return 0;
+}
+static unsigned snapshot_witness_calls;
+static BOOL snapshot_witness(SudekiMpLanHitTarget *target) {
+    ++snapshot_witness_calls;return witness(target);
+}
+static DWORD WINAPI snapshot_wrong_thread(void *unused) {
+    (void)unused;SudekiMpLanArenaEnemySnapshot snapshot,before;
+    memset(&snapshot,0xa5,sizeof(snapshot));before=snapshot;
+    SudekiMpLanHitHostSnapshot(&snapshot);
+    CHECK(!memcmp(&snapshot,&before,sizeof(snapshot)));return 0;
+}
+static void snapshot_thread_test(void) {
+    SudekiMpLanArenaEnemySnapshot snapshot={0};
+    game_thread=0;observer_installed=TRUE;damage_hook.installed=TRUE;host_witness=snapshot_witness;
+    *(void **)(ui+0x10)=entity;
+    SudekiMpLanHitHostSnapshot(&snapshot);
+    CHECK(game_thread==GetCurrentThreadId() && snapshot_witness_calls==1);
+    CHECK(snapshot.feedback_generation && snapshot.hit_count==history_count);
+    CHECK(!memcmp(snapshot.hits,history,sizeof(history)));
+    HANDLE t=CreateThread(NULL,0,snapshot_wrong_thread,NULL,0,NULL);CHECK(t!=NULL);
+    WaitForSingleObject(t,INFINITE);CloseHandle(t);
+    CHECK(game_thread==GetCurrentThreadId() && snapshot_witness_calls==1);
+    damage_hook.installed=FALSE;host_witness=NULL;observer_installed=FALSE;
+}
+static void consumer_tests(void) {
+    game_thread=0;observer_installed=TRUE;
+    CHECK(!SudekiMpLanHitObserverSubscribe(consumer_one));
+    CHECK(!SudekiMpLanHitObserverBindThread(GetCurrentThreadId()+1));
+    CHECK(!game_thread);
+    CHECK(SudekiMpLanHitObserverBindThread(GetCurrentThreadId()));
+    CHECK(SudekiMpLanHitObserverSubscribe(consumer_one));
+    CHECK(!SudekiMpLanHitObserverSubscribe(consumer_one));
+    original_damage=nested_damage;observe_damage(NULL,NULL);
+    CHECK(entered==2 && returned==2 && native_damage==2 && observer_inflight==0);
+    HANDLE t=CreateThread(NULL,0,observer_wrong_thread,NULL,0,NULL);CHECK(t!=NULL);
+    WaitForSingleObject(t,INFINITE);CloseHandle(t);
+    CHECK(consumers[0]==consumer_one); /* worker could not remove it */
+    CHECK(SudekiMpLanHitObserverUnsubscribe(consumer_one));
+    t=CreateThread(NULL,0,uninstall_wrong_thread,NULL,0,NULL);CHECK(t!=NULL);
+    WaitForSingleObject(t,INFINITE);CloseHandle(t);
+    CHECK(observer_installed && game_thread==GetCurrentThreadId());
+    CHECK(SudekiMpLanHitObserverUninstall());CHECK(SudekiMpLanHitObserverVacant());
+}
 int main(void) {
-    cursor_test(); delayed_actor_frame_test(); capture_test();
+    cursor_test(); delayed_actor_frame_test(); capture_test(); snapshot_thread_test(); consumer_tests();
     if (failures) return 1;
     puts("hit feedback tests passed"); return 0;
 }

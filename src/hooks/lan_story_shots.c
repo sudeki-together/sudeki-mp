@@ -154,3 +154,12 @@ BOOL SudekiMpLanStoryShotsAppendVisuals(const SudekiMpLanStoryNativeRoster *r,Su
     if(!state->observed) return TRUE;
     return SudekiMpLanStoryProjectileVisuals(state->stream,r->actors,state);
 }
+
+BOOL SudekiMpLanStoryShotsLatest(unsigned c,uint32_t *sequence,uint32_t *tick) {
+    if(!sequence || !tick || c>=4 || !installed || thread!=GetCurrentThreadId() ||
+        !SudekiMpLanStoryObserverNativeRosterExact(&owner)) return FALSE;
+    *sequence=journal[c].latest; *tick=0;
+    for(unsigned i=0;i<journal[c].count;++i)
+        if(journal[c].events[i].sequence==*sequence) *tick=journal[c].events[i].host_tick;
+    return TRUE;
+}

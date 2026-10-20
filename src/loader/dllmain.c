@@ -19,6 +19,7 @@
 #include "hooks/lan_arena_runtime.h"
 #include "hooks/lan_party_runtime.h"
 #include "hooks/lan_story_runtime.h"
+#include "hooks/story_enemy_targeting.h"
 #include "hooks/lan_story_spawn_trace.h"
 #include "hooks/background_audio.h"
 #include "hooks/lan_story_menu.h"
@@ -1108,6 +1109,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     if ((size_t)lstrlenW(config_path) + 13u < MAX_PATH) {
         lstrcatW(config_path, L"SudekiMP.ini");
     }
+    SudekiMpStoryEnemyTargetingConfigure(config_path);
     /* [SudekiMP] WindowTitle: name the main render window (launcher local
      * host + client profile). Exact call site only; a refusal is not fatal. */
     if (!SudekiMpWindowTitleInstall(game_module, config_path)) {

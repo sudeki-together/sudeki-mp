@@ -761,3 +761,11 @@ BOOL SudekiMpLanStoryCastUninstall(void) {
     memset(caster,0,sizeof(caster)); memset(&owners,0,sizeof(owners)); image=NULL;
     return TRUE;
 }
+
+BOOL SudekiMpLanStoryCastSpiritInFlight(unsigned c,BOOL *active) {
+    if(!active || c>=4 || !bound || !exact() || !caster[c].actor) return FALSE;
+    BOOL native=FALSE;
+    if(!SudekiMpObserveSpiritInstanceActivity(&caster[c].instance,&native)) return FALSE;
+    *active=native || caster[c].spirit_started || (submitting_spirit && submitting==(int)c);
+    return TRUE;
+}

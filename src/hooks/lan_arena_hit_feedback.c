@@ -19,6 +19,9 @@ static DamageFn original_damage;
 static PopupFn original_popup;
 static SudekiMpLanHitWitness host_witness;
 static DWORD game_thread;
+static SudekiMpLanHitConsumer consumers[4];
+static volatile LONG observer_inflight;
+static BOOL observer_installed,observer_stopping;
 static SudekiMpLanHitTarget host_target;
 static uint32_t generation, hit_sequence;
 static uint8_t history_count;
@@ -86,7 +89,8 @@ static void __stdcall observe_popup(void *ui, float before, float after, uint32_
     original_popup(ui, before, after, color);
 }
 
-static void __attribute__((thiscall)) observe_damage(void *combat, void *packet) {
+static void arena_damage(void *combat, void *packet) {
+    DamageFn damage=original_damage?original_damage:(DamageFn)damage_hook.trampoline;
     Capture capture;
     SudekiMpLanHitTarget after_target;
     uint32_t before, after;
@@ -94,14 +98,14 @@ static void __attribute__((thiscall)) observe_damage(void *combat, void *packet)
     if (GetCurrentThreadId() != game_thread || !host_witness ||
         !host_witness(&capture.target) || !SudekiMpLanHitTargetValid(&capture.target) ||
         capture.target.combat != combat) {
-        original_damage(combat, packet);
+        damage(combat, packet);
         return;
     }
     bind_target(&capture.target);
     before = (*(uint32_t *)((uint8_t *)combat + 0x5cu) >> 9u) & 0x1ffu;
     capture.parent = current_capture;
     current_capture = &capture;
-    original_damage(combat, packet); /* The sole gameplay consequence, host only. */
+    damage(combat, packet); /* The sole gameplay consequence, host only. */
     current_capture = capture.parent;
     if (!host_witness(&after_target) || !same_target(&capture.target, &after_target) ||
         !SudekiMpLanHitTargetValid(&capture.target) ||
@@ -126,6 +130,37 @@ static void __attribute__((thiscall)) observe_damage(void *combat, void *packet)
         capture.hit.reaction, (long)capture.hit.amount);
 }
 
+static void __attribute__((thiscall)) observe_damage(void *combat,void *packet) {
+    InterlockedIncrement(&observer_inflight);
+    uint64_t storage[4][24]={{0}}; BOOL accepted[4]={0};
+    /* Hook metadata is published before the entry jump by call_hook.c. */
+    if(game_thread && GetCurrentThreadId()==game_thread)
+        for(unsigned i=0;i<4;++i) if(consumers[i]) accepted[i]=consumers[i](combat,packet,FALSE,storage[i]);
+    arena_damage(combat,packet);
+    for(unsigned i=0;i<4;++i) if(accepted[i]) (void)consumers[i](combat,packet,TRUE,storage[i]);
+    InterlockedDecrement(&observer_inflight);
+}
+BOOL SudekiMpLanHitObserverBindThread(DWORD thread) {
+    if(!observer_installed || observer_stopping || !thread || thread!=GetCurrentThreadId() ||
+        (game_thread && game_thread!=thread)) {SetLastError(ERROR_INVALID_THREAD_ID);return FALSE;}
+    game_thread=thread;return TRUE;
+}
+static BOOL consumer_editable(void) {
+    if(!observer_installed || !game_thread || game_thread!=GetCurrentThreadId() ||
+        InterlockedCompareExchange(&observer_inflight,0,0)) {SetLastError(ERROR_BUSY);return FALSE;}
+    return TRUE;
+}
+BOOL SudekiMpLanHitObserverSubscribe(SudekiMpLanHitConsumer consumer) {
+    if(!consumer || observer_stopping || !consumer_editable()) return FALSE;
+    for(unsigned i=0;i<4;++i) if(consumers[i]==consumer) {SetLastError(ERROR_ALREADY_EXISTS);return FALSE;}
+    for(unsigned i=0;i<4;++i) if(!consumers[i]) {consumers[i]=consumer;return TRUE;}
+    SetLastError(ERROR_NO_SYSTEM_RESOURCES);return FALSE;
+}
+BOOL SudekiMpLanHitObserverUnsubscribe(SudekiMpLanHitConsumer consumer) {
+    if(!consumer || !consumer_editable()) return FALSE;
+    for(unsigned i=0;i<4;++i) if(consumers[i]==consumer) {consumers[i]=NULL;return TRUE;}
+    SetLastError(ERROR_NOT_FOUND);return FALSE;
+}
 BOOL SudekiMpLanHitImageMatches(HMODULE image) {
     uint8_t *b = (uint8_t *)image;
     int32_t displacement;
@@ -140,34 +175,43 @@ BOOL SudekiMpLanHitImageMatches(HMODULE image) {
 }
 
 BOOL SudekiMpLanHitHostInstall(HMODULE image, SudekiMpLanHitWitness witness) {
+    if(!witness || host_witness || !SudekiMpLanHitObserverInstall(image)) return FALSE;
+    host_witness=witness;return TRUE;
+}
+BOOL SudekiMpLanHitObserverVacant(void) {return !observer_installed && !damage_hook.installed && !popup_hook.installed;}
+BOOL SudekiMpLanHitObserverInstall(HMODULE image) {
     uint8_t *b = (uint8_t *)image;
-    if (!witness || damage_hook.installed || popup_hook.installed ||
+    if (observer_installed || damage_hook.installed || popup_hook.installed ||
         !SudekiMpLanHitImageMatches(image)) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
-    host_witness = witness;
     original_popup = (PopupFn)(b + POPUP_RVA);
     if (!SudekiMpInstallInlineHook(&damage_hook, b + DAMAGE_RVA,
         damage_prefix, sizeof(damage_prefix), observe_damage)) return FALSE;
-    original_damage = (DamageFn)damage_hook.trampoline;
     if (!SudekiMpInstallRelativeCallHook(&popup_hook, b + POPUP_CALL_RVA,
         original_popup, observe_popup)) {
         DWORD error = GetLastError();
         (void)SudekiMpLanHitHostUninstall();
         SetLastError(error); return FALSE;
     }
+    original_damage=(DamageFn)damage_hook.trampoline;
+    observer_installed=TRUE;
     return TRUE;
 }
 
-BOOL SudekiMpLanHitHostUninstall(void) {
+BOOL SudekiMpLanHitHostUninstall(void) { return SudekiMpLanHitObserverUninstall(); }
+BOOL SudekiMpLanHitObserverUninstall(void) {
     DWORD error = ERROR_SUCCESS;
     BOOL popup_ok, damage_ok;
-    if (current_capture) { SetLastError(ERROR_BUSY); return FALSE; }
+    if (current_capture || InterlockedCompareExchange(&observer_inflight,0,0) ||
+        (game_thread && game_thread!=GetCurrentThreadId())) {SetLastError(ERROR_BUSY);return FALSE;}
+    for(unsigned i=0;i<4;++i) if(consumers[i]) {SetLastError(ERROR_BUSY);return FALSE;}
+    observer_stopping=TRUE;
     popup_ok = SudekiMpRestoreRelativeCallHook(&popup_hook);
     if (!popup_ok) error = GetLastError();
     damage_ok = SudekiMpRestoreInlineHook(&damage_hook);
     if (!damage_ok && error == ERROR_SUCCESS) error = GetLastError();
     if (!popup_ok || !damage_ok) { SetLastError(error); return FALSE; }
-    original_popup = NULL; original_damage = NULL; host_witness = NULL;
-    game_thread = 0; current_capture = NULL;
+    original_popup = NULL; original_damage=NULL; host_witness = NULL;
+    game_thread = 0; current_capture = NULL; observer_installed=observer_stopping=FALSE;
     memset(&host_target, 0, sizeof(host_target)); history_count = 0;
     return TRUE;
 }
@@ -175,7 +219,7 @@ BOOL SudekiMpLanHitHostUninstall(void) {
 void SudekiMpLanHitHostSnapshot(SudekiMpLanArenaEnemySnapshot *enemy) {
     SudekiMpLanHitTarget target = {0};
     if (!enemy || !damage_hook.installed || !host_witness) return;
-    game_thread = GetCurrentThreadId();
+    if(!SudekiMpLanHitObserverBindThread(GetCurrentThreadId())) return;
     if (!host_witness(&target) || !SudekiMpLanHitTargetValid(&target)) {
         bind_target(&(SudekiMpLanHitTarget){0});
         return;

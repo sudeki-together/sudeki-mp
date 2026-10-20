@@ -68,4 +68,8 @@ BOOL SudekiMpLanPartyProjectileLifetimeObserve(
  * retains all state if any observer or unknown obligation remains. */
 BOOL SudekiMpLanPartyProjectileLifetimeUninstall(void);
 
+/* Read-only packet attribution, including from inside a native missile
+ * callback. Independently proves the retained weak cell and source namespace;
+ * unlike Observe it does not require the outer native callback to be idle. */
+BOOL SudekiMpLanPartyProjectileDamageMatch(void *actor,void *packet_data,BOOL *match);
 #endif

@@ -41,4 +41,16 @@ BOOL SudekiMpLanHitTargetValid(const SudekiMpLanHitTarget *target);
 BOOL SudekiMpLanHitResolveTarget(void *entity, uint64_t session,
     SudekiMpLanHitTarget *target);
 
+/* Shared HP receiver owner. Consumers borrow native pointers only for this
+ * synchronous call. Each gets independent zeroed, aligned 192-byte storage;
+ * return TRUE on entry to request the matching return notification. Never
+ * retain a pointer or mutate a packet. Registration requires an explicitly
+ * bound native thread, and is refused while any damage call is in flight. */
+typedef BOOL (*SudekiMpLanHitConsumer)(void *combat,void *packet,BOOL after,void *storage);
+BOOL SudekiMpLanHitObserverVacant(void);
+BOOL SudekiMpLanHitObserverInstall(HMODULE image);
+BOOL SudekiMpLanHitObserverBindThread(DWORD verified_thread);
+BOOL SudekiMpLanHitObserverSubscribe(SudekiMpLanHitConsumer consumer);
+BOOL SudekiMpLanHitObserverUnsubscribe(SudekiMpLanHitConsumer consumer);
+BOOL SudekiMpLanHitObserverUninstall(void);
 #endif

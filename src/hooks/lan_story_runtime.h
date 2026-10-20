@@ -12,6 +12,37 @@ BOOL SudekiMpUninstallLanStoryRuntime(void);
 void SudekiMpLanStoryRuntimeSetStepAway(BOOL enabled);
 BOOL SudekiMpLanStoryRuntimeStepAwayEnabled(void);
 BOOL SudekiMpLanStoryRuntimeCharacterAway(unsigned character);
+/* Host game-thread proof of a connected away seat after native control has
+ * drained. The expected transport lease prevents reusing a prior connection. */
+enum SudekiMpLanStoryRuntimeAwaySeatRefusal {
+    STORY_AWAY_REFUSAL_INVALID_ARGUMENT,
+    STORY_AWAY_REFUSAL_NOT_INITIALIZED,
+    STORY_AWAY_REFUSAL_CLIENT_SEAT,
+    STORY_AWAY_REFUSAL_THREAD,
+    STORY_AWAY_REFUSAL_STOPPING,
+    STORY_AWAY_REFUSAL_BINDING_NOT_READY,
+    STORY_AWAY_REFUSAL_MENU_CAPTURES,
+    STORY_AWAY_REFUSAL_NOT_OWNER,
+    STORY_AWAY_REFUSAL_SWAP_PHASE,
+    STORY_AWAY_REFUSAL_NOT_CONNECTED,
+    STORY_AWAY_REFUSAL_NOT_AWAY,
+    STORY_AWAY_REFUSAL_CONTROL_NOT_AI,
+    STORY_AWAY_REFUSAL_NATIVE_KEY_RETAINED,
+    STORY_AWAY_REFUSAL_ACQUIRED,
+    STORY_AWAY_REFUSAL_DRAINING,
+    STORY_AWAY_REFUSAL_CHARACTER_MISMATCH,
+    STORY_AWAY_REFUSAL_PEER_STATUS,
+    STORY_AWAY_REFUSAL_PEER_PHASE,
+    STORY_AWAY_REFUSAL_TRANSPORT,
+    STORY_AWAY_REFUSAL_CONNECTION_MISMATCH,
+    STORY_AWAY_REFUSAL_NONE,
+};
+enum SudekiMpLanStoryRuntimeAwaySeatRefusal SudekiMpLanStoryRuntimeAwaySeatRefusal(
+    unsigned character,const SudekiMpLanPartyLease *connection);
+BOOL SudekiMpLanStoryRuntimeAwaySeatExact(unsigned character,
+    const SudekiMpLanPartyLease *connection);
+/* Current unclaimed companion, or a proven fully released away reservation. */
+BOOL SudekiMpLanStoryRuntimeCompanionSeatExact(unsigned character);
 BOOL SudekiMpLanStoryRuntimeAwayIntent(void);
 BOOL SudekiMpLanStoryRuntimeRequestAway(BOOL away);
 /* #71: FALSE keeps the client's mathematical orbit camera (ini [StoryAreas] ClientMathCamera=true). */

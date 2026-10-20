@@ -43,4 +43,6 @@ BOOL SudekiMpLanStoryCastAiming(void *actor);
 BOOL SudekiMpLanStoryCastRetains(void);
 void SudekiMpLanStoryCastRequestStop(void);
 BOOL SudekiMpLanStoryCastUninstall(void);
+/* Positive observation; FALSE is unknown, not proof of no strike. */
+BOOL SudekiMpLanStoryCastSpiritInFlight(unsigned character,BOOL *active);
 #endif

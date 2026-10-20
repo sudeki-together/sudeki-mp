@@ -18,8 +18,11 @@ static DWORD fixture_get_tick_count(void) {return fixture_tick;}
 #undef put32
 #undef get32
 #include "../src/network/lan_story_handoff.c"
+#include "../src/engine/party_ownership.c"
+#include "../src/network/story_threat.c"
 #include <assert.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 static SudekiMpControlUpdateDispatchWitness test_witness;
 static SudekiMpLanStoryNativeRoster test_roster;
@@ -133,7 +136,12 @@ BOOL SudekiMpLanStoryHostControlExteriorNativeSteeringReady(const SudekiMpLanSto
     return exterior_steering && SudekiMpLanStoryHostControlExteriorNativeBound(r,c);
 }
 
-void SudekiMpLogFormat(const char *format,...) {(void)format;}
+static unsigned away_refusal_log_count;static char away_refusal_last_log[256];
+void SudekiMpLogFormat(const char *format,...) {
+    if(!strstr(format,"event=away_refused ")) return;
+    va_list args;va_start(args,format);vsnprintf(away_refusal_last_log,sizeof(away_refusal_last_log),format,args);va_end(args);
+    ++away_refusal_log_count;
+}
 BOOL SudekiMpLanStoryMenuCapturesInput(void) {return menu_captures;}
 unsigned SudekiMpLanPartyPlayerCharacter(SudekiMpLanPartySession *s,unsigned player) {
     assert(s==session && player<4);return assigned_character[player];
@@ -676,10 +684,148 @@ static void camera_continuity_refusals(void) {
 #undef CAMERA_REFUSES
     puts("PASS named RevisionGapCameraAdmission: current normal selector/dialogue required; cast, menus, recruitment, stale identities, replaced owner, foreign thread and original age refuse before native tick");
 }
+static unsigned mapped_enemy_seat(unsigned character,SudekiMpStoryThreatSeat *seat,
+    unsigned *firing,SudekiMpLanPartyLease *away_key,BOOL *coop) {
+    enemy_targeting_seat(character,&test_witness,&test_roster,seat,firing,away_key,coop,fixture_tick);
+    seat->host=character==test_roster.leader_character;
+    return SudekiMpStoryThreatSeatKind(seat,fixture_tick);
+}
+static void enemy_seat_mapping(void) {
+    fixture(15,3);acquire(1,2,TRUE);fixture_tick=5000;
+    SudekiMpPartyAssignment assignment={.world=1,.revision=1,.generation={1,1,1,1},
+        .humans=3,.available=15,.character={3,2,4,4}};
+    assert(SudekiMpPartyOwnershipInitializePresence(&story_presence.ownership,&assignment,3,3));
+    story_policy_initialized=TRUE;
+    host_control[1].heard_at=fixture_tick;host_control[1].last_input_at=0;host_control[1].input_held=TRUE;
+    SudekiMpStoryThreatSeat seat;SudekiMpLanPartyLease away_key;unsigned firing;BOOL coop=FALSE;
+#define MAPPED(character) mapped_enemy_seat(character,&seat,&firing,&away_key,&coop)
+    unsigned kind=MAPPED(2);
+    if(kind!=STORY_SEAT_REMOTE) fprintf(stderr,"REGRESSION input_held: fresh heard_at=%lu last_input_at=0 mapped=%s expected=human_remote\n",
+        (unsigned long)host_control[1].heard_at,SudekiMpStoryThreatSeatName(kind));
+    assert(kind==STORY_SEAT_REMOTE);
+    assert(!seat.held && seat.receipt==fixture_tick && !away_key.token && !coop);
+#define SEAT_AI(change,restore) do {change;assert(MAPPED(2)==STORY_SEAT_AI);restore;assert(MAPPED(2)==STORY_SEAT_REMOTE);} while(0)
+    SEAT_AI(host_control[1].heard_at=fixture_tick-SUDEKIMP_LAN_PARTY_INPUT_MAX_AGE_MS-1,host_control[1].heard_at=fixture_tick);
+    SEAT_AI(host_control[1].heard_at=1,host_control[1].heard_at=fixture_tick);
+    SEAT_AI(host_control[1].heard_at=0,host_control[1].heard_at=fixture_tick);
+    fixture_tick=100; /* Sentinel must stay stale even within the age horizon. */
+    host_control[1].heard_at=fixture_tick;
+    SEAT_AI(host_control[1].heard_at=1,host_control[1].heard_at=fixture_tick);
+    fixture_tick=5000;host_control[1].heard_at=fixture_tick;
+    SEAT_AI(host_control[1].draining=TRUE,host_control[1].draining=FALSE);
+    SEAT_AI(host_control[1].acquired=FALSE,host_control[1].acquired=TRUE);
+    SEAT_AI(lease_exact[1]=FALSE,lease_exact[1]=TRUE);
+    SEAT_AI(host_control[1].ready=FALSE,host_control[1].ready=TRUE);
+    SEAT_AI(story_presence.ownership.control[1]=SUDEKIMP_PARTY_CONTROL_AI,story_presence.ownership.control[1]=SUDEKIMP_PARTY_CONTROL_HUMAN);
+    SEAT_AI(story_presence.ownership.control[1]=SUDEKIMP_PARTY_CONTROL_WAIT_ACK,story_presence.ownership.control[1]=SUDEKIMP_PARTY_CONTROL_HUMAN);
+    story_presence.ownership.away=2;story_presence.ownership.control[1]=SUDEKIMP_PARTY_CONTROL_AI;
+    assert(MAPPED(2)==STORY_SEAT_AWAY && !away_key.token && !coop);
+    memset(&host_control[1],0,sizeof(host_control[1]));
+    assert(MAPPED(2)==STORY_SEAT_AWAY && same_connection(&away_key,&test_peers[1].lease) && coop);
+    assert(MAPPED(0)==STORY_SEAT_AI && seat.owned_ai && !seat.connected);
+    assert(MAPPED(3)==STORY_SEAT_HOST && !seat.connected && !seat.away);
+#undef SEAT_AI
+#undef MAPPED
+    puts("PASS enemy seat mapping: host-held fresh client stays REMOTE; stale/draining/unleased/non-human refuse, away and unclaimed/host mapping preserved");
+}
+static DWORD WINAPI away_admission_wrong_thread(void *key) {
+    assert(runtime_thread && runtime_thread!=GetCurrentThreadId());
+    assert(SudekiMpLanStoryRuntimeAwaySeatRefusal(2,key)==STORY_AWAY_REFUSAL_THREAD);
+    assert(!SudekiMpLanStoryRuntimeAwaySeatExact(2,key));
+    assert(!SudekiMpLanStoryRuntimeCompanionSeatExact(2));
+    assert(!SudekiMpLanStoryRuntimeCompanionSeatExact(0)); /* unclaimed: tests its own thread gate */
+    return 0;
+}
+static void away_targeting_admission(void) {
+    fixture(12,3);acquire(1,2,FALSE);
+    SudekiMpPartyAssignment assignment={.world=1,.revision=1,.generation={1,1,1,1},
+        .humans=3,.available=12,.character={3,2,4,4}};
+    assert(SudekiMpPartyOwnershipInitializePresence(&story_presence.ownership,&assignment,3,1));
+    story_policy_initialized=TRUE;story_presence.ownership.away=2;
+    SudekiMpLanPartyLease key=test_peers[1].lease;
+    /* Claim and connectivity cannot substitute for a completed native drain. */
+    assert(SudekiMpLanStoryRuntimeAwaySeatRefusal(2,&key)==STORY_AWAY_REFUSAL_NATIVE_KEY_RETAINED);
+    assert(!SudekiMpLanStoryRuntimeAwaySeatExact(2,&key));
+    memset(&host_control[1],0,sizeof(host_control[1]));
+    SudekiMpPartyOwnership before=story_presence.ownership;
+    assert(SudekiMpLanStoryRuntimeAwaySeatExact(2,&key));
+    assert(!memcmp(&before,&story_presence.ownership,sizeof(before)));
+    assert(SudekiMpLanStoryRuntimeCompanionSeatExact(2));
+    story_presence.ownership.assignment.available|=1;
+    assert(SudekiMpLanStoryRuntimeCompanionSeatExact(0));
+    HANDLE worker=CreateThread(NULL,0,away_admission_wrong_thread,&key,0,NULL);assert(worker);
+    WaitForSingleObject(worker,INFINITE);CloseHandle(worker);
+    story_presence.ownership.assignment.available&=~1u;
+    assert(SudekiMpLanStoryRuntimeAwaySeatExact(2,&key) && SudekiMpLanStoryRuntimeCompanionSeatExact(2));
+    assert(!SudekiMpLanStoryRuntimeCompanionSeatExact(3));
+    assert(!SudekiMpLanStoryRuntimeCompanionSeatExact(0));
+    story_presence.ownership.assignment.available|=1;
+    assert(SudekiMpLanStoryRuntimeCompanionSeatExact(0));
+    story_presence.ownership.assignment.available&=~1u;
+    host_control[1].draining=TRUE;assert(!SudekiMpLanStoryRuntimeCompanionSeatExact(2));host_control[1].draining=FALSE;
+    story_presence.ownership.away=0;assert(!SudekiMpLanStoryRuntimeCompanionSeatExact(2));story_presence.ownership.away=2;
+    menu_captures=TRUE;assert(!SudekiMpLanStoryRuntimeCompanionSeatExact(2));menu_captures=FALSE;
+    assert(!SudekiMpLanStoryRuntimeCompanionSeatExact(4));
+#define AWAY_CHECK(c,k,reason) do {enum SudekiMpLanStoryRuntimeAwaySeatRefusal why=SudekiMpLanStoryRuntimeAwaySeatRefusal(c,k); \
+    assert(why==STORY_AWAY_REFUSAL_##reason);assert(SudekiMpLanStoryRuntimeAwaySeatExact(c,k)==(why==STORY_AWAY_REFUSAL_NONE));} while(0)
+#define AWAY_REFUSES(change,restore,reason) do {change;AWAY_CHECK(2,&key,reason);restore;AWAY_CHECK(2,&key,NONE);} while(0)
+    AWAY_REFUSES(key.generation++,key.generation--,CONNECTION_MISMATCH);
+    AWAY_REFUSES(key.token++,key.token--,CONNECTION_MISMATCH);
+    AWAY_REFUSES(key.seat=2,key.seat=1,CONNECTION_MISMATCH);
+    AWAY_REFUSES(peer_known[1]=FALSE,peer_known[1]=TRUE,PEER_STATUS);
+    AWAY_REFUSES(test_peers[1].transport_confirmed=FALSE,test_peers[1].transport_confirmed=TRUE,TRANSPORT);
+    AWAY_REFUSES(test_peers[1].phase=0,test_peers[1].phase=SUDEKIMP_LAN_PARTY_OBSERVING,PEER_PHASE);
+    AWAY_REFUSES(story_presence.ownership.away=0,story_presence.ownership.away=2,NOT_AWAY);
+    AWAY_REFUSES(story_presence.ownership.connected=1,story_presence.ownership.connected=3,NOT_CONNECTED);
+    AWAY_REFUSES(story_presence.ownership.phase=SUDEKIMP_PARTY_SWAP_HANDOFF,story_presence.ownership.phase=SUDEKIMP_PARTY_SWAP_IDLE,SWAP_PHASE);
+    AWAY_REFUSES(story_presence.ownership.control[1]=SUDEKIMP_PARTY_CONTROL_ACQUIRING,story_presence.ownership.control[1]=SUDEKIMP_PARTY_CONTROL_AI,CONTROL_NOT_AI);
+    AWAY_REFUSES(story_presence.ownership.control[1]=SUDEKIMP_PARTY_CONTROL_WAIT_ACK,story_presence.ownership.control[1]=SUDEKIMP_PARTY_CONTROL_AI,CONTROL_NOT_AI);
+    AWAY_REFUSES(assigned_character[1]=0,assigned_character[1]=2,CHARACTER_MISMATCH);
+    AWAY_REFUSES(host_control[1].native_key.token=9,host_control[1].native_key.token=0,NATIVE_KEY_RETAINED);
+    AWAY_REFUSES(host_control[1].acquired=TRUE,host_control[1].acquired=FALSE,ACQUIRED);
+    AWAY_REFUSES(host_control[1].draining=TRUE,host_control[1].draining=FALSE,DRAINING);
+    AWAY_REFUSES(story_policy_initialized=FALSE,story_policy_initialized=TRUE,NOT_INITIALIZED);
+    AWAY_REFUSES(saved_profile=FALSE,saved_profile=TRUE,NOT_INITIALIZED);
+    AWAY_REFUSES(control_attempted=FALSE,control_attempted=TRUE,NOT_INITIALIZED);
+    AWAY_REFUSES(host_binding_ready=FALSE,host_binding_ready=TRUE,BINDING_NOT_READY);
+    menu_captures=TRUE;AWAY_CHECK(2,&key,NONE);
+    assert(!SudekiMpLanStoryRuntimeCompanionSeatExact(2));menu_captures=FALSE;
+    AWAY_REFUSES(local_seat=1,local_seat=0,CLIENT_SEAT);
+    AWAY_REFUSES(stopping=1,stopping=0,STOPPING);
+    AWAY_REFUSES(runtime_thread=0,runtime_thread=GetCurrentThreadId(),THREAD);
+    SudekiMpLanPartySession *saved_session=session;
+    AWAY_REFUSES(session=NULL,session=saved_session,NOT_INITIALIZED);
+    uint64_t saved_token=key.token;AWAY_REFUSES(key.token=0,key.token=saved_token,INVALID_ARGUMENT);
+    AWAY_CHECK(2,NULL,INVALID_ARGUMENT);AWAY_CHECK(4,&key,INVALID_ARGUMENT);
+    AWAY_CHECK(3,&key,NOT_OWNER);AWAY_CHECK(0,&key,NOT_OWNER);AWAY_CHECK(2,&key,NONE);
+    /* Refusal logging is per reason change, with a single 64-record namespace budget. */
+    SudekiMpStoryThreatSeat seat;SudekiMpLanPartyLease away_key;unsigned firing;BOOL coop=FALSE;
+    memset(&away_refused_logs,0,sizeof(away_refused_logs));away_refusal_log_count=0;
+    host_binding_ready=FALSE;
+    for(unsigned i=0;i<10;++i) mapped_enemy_seat(2,&seat,&firing,&away_key,&coop);
+    assert(away_refusal_log_count==1 && strstr(away_refusal_last_log,"reason=binding_not_ready"));
+    for(unsigned i=0;i<150;++i) {
+        host_binding_ready=(i&1)!=0;host_control[1].draining=host_binding_ready;
+        mapped_enemy_seat(2,&seat,&firing,&away_key,&coop);
+    }
+    assert(away_refusal_log_count==64 && away_refused_logs.count==64);
+    ++test_roster.revision;mapped_enemy_seat(2,&seat,&firing,&away_key,&coop);
+    assert(away_refusal_log_count==65 && away_refused_logs.count==1);
+    ++test_roster.epoch;mapped_enemy_seat(2,&seat,&firing,&away_key,&coop);
+    assert(away_refusal_log_count==66 && away_refused_logs.count==1);
+    host_binding_ready=TRUE;host_control[1].draining=FALSE;menu_captures=TRUE;coop=FALSE;
+    mapped_enemy_seat(2,&seat,&firing,&away_key,&coop);
+    assert(coop && away_key.token && away_refusal_log_count==66);
+    assert(!SudekiMpLanStoryRuntimeCompanionSeatExact(2));menu_captures=FALSE;
+#undef AWAY_CHECK
+#undef AWAY_REFUSES
+    puts("PASS away combat admission: owned AI after drain; current connection, host profile, reservation and thread required");
+}
 int main(void) {
     prepare_and_acknowledgement();refused_leases();multiple_clients();ai_reservation_without_input();
     settled_eligibility_prepass();exterior_shop_permissions();client_revision_continuity();
     camera_continuity_clock();camera_continuity_refusals();
+    enemy_seat_mapping();away_targeting_admission();
     puts("PASS actual runtime split/activity mask policy; native AI suppression and live TEMP remain separate evidence");
     return 0;
 }
