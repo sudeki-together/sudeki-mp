@@ -1,8 +1,49 @@
-SUDEKIMP WINDOWS LAUNCHER
+SUDEKIMP 0.7.0 WINDOWS LAUNCHER
 ========================
 
 This archive contains one SudekiMP folder. It is not a game installer and it
 does not include Sudeki itself.
+
+STORY CO-OP UPDATE - 0.7.0
+-------------------------------------------
+
+Version 0.7.0 brings the accumulated saved-story co-op work to the Windows
+launcher package. It includes the castle/Brightwater gameplay checkpoint
+d433688 plus build-note and test-portability follow-ups. It is experimental;
+bug fixes and slowdown investigation continue.
+
+Included in 0.7.0:
+- Castle transitions handle the larger actor roster and temporary missing
+  actor poses without immediately abandoning the world update.
+- Step-away and return handling, enemy targeting eligibility, and companion
+  defense policies have been revised. Experimental enemy targeting tiers
+  keep their existing opt-in settings; the default remains observation only.
+- The castle arrival movie can play on each game, with the host controlling
+  skip/end. When the story makes Tal the lead, his connected reserved player
+  controls him; both games use the authored room camera. Temporary host
+  control is for a disconnected owner.
+
+To test that arrival/lead handoff, enable ClientLeadSpectate=true in the
+[StoryAreas] section of both games' active SudekiMP.ini files before launch.
+It remains off by default. This covers the researched castle arrival; it is
+not general replication of every campaign cutscene or leader switch.
+
+The owner completed the castle <-> Brightwater loop with host Ailish and
+client Tal in two Linux/Wine windows on one PC. That run used party
+invulnerability and a King's Road test start. The live-tested cross-build DLL
+has SHA-256:
+7d3596822dcf355694ef60a66660e6231ed46262b7a00732904183c24b9e7ae8
+A native Windows runner produces a separate artifact and hash. Successful
+Windows compilation/tests do not establish native Windows gameplay acceptance.
+
+Remaining checks include slowdowns/frame times, broader campaign routes,
+multiple machines, native Windows play, disconnect/rejoin, and detailed movie
+and camera recovery. Host-only kick/body reassignment is not part of this build.
+
+Saved-story inventories are per game, with eligible loot copied to each game;
+this is not complete per-player save persistence. Join-time host save import
+exists, but ongoing save synchronization and the planned keep/discard flow
+are incomplete. Use matching 0.7.0 builds for all players.
 
 1. Install the supported GOG release of Sudeki.
 2. Copy the included "SudekiMP" folder beside SUDEKI.exe. Example:
@@ -20,7 +61,8 @@ which requires the game and DLL paths. `Launch SudekiMP.cmd` opens the native
 that loader.
 
 Before first launch, this beta checks that SUDEKI.exe is the supported GOG
-build. It never changes SUDEKI.exe, the game archives, or your save files.
+build. It does not patch SUDEKI.exe or the game archives. Save-fixture
+installation and multiplayer save import write save data, as described here.
 
 Choose a profile in the launcher: **Local co-op (2 players)**,
 **Multiplayer (title menu lobby)**, **Cleanroom**, or **Safe launch**.
@@ -55,8 +97,9 @@ log, active INI, and launcher summary. Log upload is not implemented; share the
 folder manually when requested.
 
 Update checks are optional. **Check for updates on startup** only reads the
-official small manifest and prompts when a different version exists. The
-launcher never installs an update silently or changes Sudeki game data/saves.
+official release metadata and prompts when a newer version exists. The
+launcher never installs an update silently or patches the installed game
+executable or archives.
 
 LICENSE AND ATTRIBUTION
 -----------------------
@@ -97,8 +140,8 @@ music catalog and track over HTTPS, caches it under `%LOCALAPPDATA%\SudekiMP`,
 and plays it inside the launcher. The MP3 is not packaged with the beta.
 The **Developer: wander** button opens https://git.unfilteredrealm.com/wander.
 
-The **Check for updates** button reads the public launcher manifest and, after
-confirmation, opens the public package page in your browser.
+The **Check for updates** button checks the official releases and, after
+confirmation, opens the newer release page in your browser.
 Download and extract the ZIP yourself, then replace only this `SudekiMP`
 folder. This beta deliberately does not use an unsigned PowerShell self-updater:
 manual replacement is clearer, preserves your `SudekiMP.ini`, and never changes

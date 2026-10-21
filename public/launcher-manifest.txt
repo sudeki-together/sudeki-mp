@@ -1,4 +1,4 @@
-version=0.6.1
+version=0.7.0
 release_url=https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/releases
 linux_package=sudekimp-linux-launcher.tar.gz
 windows_package=sudekimp-windows-launcher.zip

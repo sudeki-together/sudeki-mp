@@ -13,9 +13,10 @@ of Sudeki.
 
 > [!NOTE]
 > SudekiMP is playable with limits and still under active development. The
-> table below says exactly what works today and what does not. Everything in it
-> was accepted in live play by the project owner on one machine; nothing has
-> been through a public beta yet.
+> table below summarizes the current scope. Gameplay acceptance comes from
+> owner play on one Linux/Wine machine; native Windows builds are a separate
+> check. See the [0.7.0 release notes](docs/release-notes-0.7.0.md) for this
+> update, opt-in settings and remaining gaps.
 
 ## Download
 
@@ -34,7 +35,7 @@ it never downloads or installs anything by itself. Install steps are in
 
 | Mode | Status | What works | What does not (yet) |
 | --- | --- | --- | --- |
-| **Story co-op over LAN** (launcher profile *Multiplayer (title menu lobby)*) | Playable with limits | One player hosts a saved game, friends join from the game's main menu. Everyone moves, fights (melee, ranged, skills, Spirit Strikes), sees the same enemies, deaths, drops, XP popups, doors and chests. The joining player has the game's own camera, HUD, audio and controls for their character. | Only the host can open doors and chests, talk, shop or save; joiners see the result. One shared party inventory, owned by the host. Both players need an identical copy of the save. No leader change or spectating when a character falls. Bosses, the full campaign and saves transfer are untested or unbuilt. |
+| **Story co-op over LAN** (launcher profile *Multiplayer (title menu lobby)*) | Playable with limits | One player hosts a saved game, friends join from the game's main menu. Everyone moves, fights (melee, ranged, skills, Spirit Strikes), sees the same enemies, deaths, drops, XP popups, doors and chests. The joining player has the game's own camera, HUD, audio and controls for their character. | Full-campaign, boss, other NPC/shop and disconnect/rejoin coverage remains incomplete. Inventories are per game with eligible loot copied; join-time host save import exists, but complete per-player persistence and ongoing save synchronization do not. Castle arrival/client-owned Tal lead requires the opt-in described in the release notes. |
 | **Two games on one PC** (profile *Local host + client (two windows)*) | Playable with limits | Starts a host and a client window on the same machine, each with its own saves folder, auto-joined into one room. Same rules as above. | Both games must run windowed; this is how the mode has been tested so far. |
 | **Local co-op split screen** (profile *Local co-op (2 players)*) | Experimental | Keyboard/mouse Player 1 and a controller Player 2 in one Sudeki process, each with their own camera half; drop in/out with Start / F10. | Accepted on Linux/Wine with a Linux controller only; native Windows controller delivery is a follow-up. Many menus are shared and shown full width. Player 2 cannot interact with the world yet. |
 | **Mods** (launcher Mods tab) | Experimental | Texture packages, TexMod `.tpf` conversion, archive/sound/movie files, a clean 4× font example, Main Menu armour choice, flight mode in Safe launch. | See [docs/mod-packages.md](docs/mod-packages.md) for format limits. |
@@ -64,9 +65,9 @@ cleanly if anything differs. Nothing is written to the game's files.
 ## Playing story co-op
 
 1. Both players install the same SudekiMP version beside their own copy of
-   Sudeki, and both have the **same save** (copy the host's `SAVESLOTnnnn`
-   folder to the joiner — the lobby checks the save fingerprint and refuses a
-   mismatch).
+   Sudeki. The host selects a save; the lobby can transfer it to a joiner and
+   import it into a reserved co-op slot. This join-time import is not ongoing
+   save synchronization or complete per-player persistence.
 2. Each player starts the launcher and picks **Multiplayer (title menu lobby)**,
    then **Play**. The game's main menu gains a **Multiplayer** entry.
 3. The host creates a room (UDP port 26770, shown on the LAN browser). Joiners
@@ -78,9 +79,11 @@ cleanly if anything differs. Nothing is written to the game's files.
 5. Everyone presses **Ready**; the host presses **Start**. Both games load the
    save and the joiner takes control of their character.
 
-In play, the host decides where the party goes: zone changes, houses, doors and
-chests are triggered by the host, and the joiner is brought along. Controls, camera, HUD and sound for the
-joiner are the game's own. If something goes wrong, `SudekiMP.log` is written
+In play, the host remains authoritative over shared world and story state.
+Personal menus, inventories and the researched remote-interaction paths have
+their own scoped behavior; see the release notes and status matrix. Controls,
+camera, HUD and sound for the joiner use the game's native systems. If something
+goes wrong, `SudekiMP.log` is written
 beside `SUDEKI.exe` on each machine; attach both when reporting.
 
 To try it alone, choose **Local host + client (two windows)** instead of step 2:

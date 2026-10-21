@@ -97,7 +97,7 @@ static void controller_parity(void) {
         {0.0009f,0.0009f},{-0.001f,0},{0,-0.001f},{-0.0011f,0},
         {0,-0.0011f},{0.001f,0.001f},{0.0011f,0},{4.004f,4.004f}};
     for(unsigned i=0;i<sizeof(inputs)/sizeof(*inputs);++i) {
-        float local[3],heading[3],speed;
+        float local[3]={NAN,NAN,NAN},heading[3]={NAN,NAN,NAN},speed=NAN;
         assert(SudekiMpStoryMovementLocal(inputs[i][0],inputs[i][1],local));
         assert(SudekiMpStoryMovementVector(local[0],local[2],heading,&speed));
         moves=stops=0;

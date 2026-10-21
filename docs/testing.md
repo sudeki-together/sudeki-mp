@@ -2003,3 +2003,33 @@ The owner requests a commit, push and build at this point, with bug fixes and
 slowdown investigation before release. This records an experimental gameplay
 checkpoint, not release readiness. Raw logs, configs and prior DLL artifacts
 remain private and separate; no live process was reloaded for the checkpoint.
+
+
+## Launcher 0.7.0 Windows build preparation — 2026-10-20
+
+The owner requests a successful branch build, merge to main, a fresh main
+Windows build, then a 0.7.0 release. Windows workflow run
+[211](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/actions/runs/211)
+on `d433688` reached compilation on the online runner, then failed under
+`-Werror=maybe-uninitialized` in `StoryPlayerMovementImageTest`:
+`controller_parity` left `local`, `heading` and `speed` uninitialized before
+asserted helper calls. The helper-success assertions already existed; this was
+not an offline-runner failure. No package was uploaded by that failed run.
+
+The fixture now initializes those outputs to NaN, preserving both success
+assertions and invalid-output detection. No movement/runtime behavior changes.
+Launcher version strings, manifest, package filenames and the existing surface
+check advance to 0.7.0. Packaged notes and README reflect per-game inventory,
+join-time save import, opt-in castle arrival and the bounded owner acceptance;
+[release notes](release-notes-0.7.0.md) remain explicit about untested Windows
+play and continuing bug/performance work.
+
+All-target cross-build passes. StoryPlayerMovementImageTest on the supported
+image, LauncherReleaseCheckTest, isolated LauncherTabsTest, launcher surface
+and shell syntax checks pass. The first direct LauncherTabs run encountered
+an existing temporary-directory fixture and exited 3; it was rerun with a
+fresh temp directory and the existing isolated desktop harness. Both results
+are retained privately. Graphify AST update and diff checks pass. The runtime
+DLL remains `7d3596822dcf355694ef60a66660e6231ed46262b7a00732904183c24b9e7ae8`;
+the existing gameplay validation is unchanged. Native Windows retry and final
+main-build artifact validation are subsequent gates, recorded on the release.
