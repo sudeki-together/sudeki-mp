@@ -4,7 +4,7 @@
 #include <stdio.h>
 int main(void) {
     const unsigned sizes[][2]={{640,480},{960,720},{1280,720},{1920,1080},{2560,1080},{1080,1920},{3840,2160}};
-    SudekiMpStoryAwayLayout b;
+    SudekiMpStoryAwayLayout b={NAN,NAN,NAN,NAN};
     for(unsigned i=0;i<sizeof(sizes)/sizeof(*sizes);++i) {
         float scale=fminf(sizes[i][0]/960.f,sizes[i][1]/720.f),width=430.f*scale;
         assert(SudekiMpStoryAwayBannerLayout(sizes[i][0],sizes[i][1],width,&b));

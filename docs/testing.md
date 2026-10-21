@@ -2045,3 +2045,13 @@ The all-target cross-build, supported-GEX SolShopStockImageTest, pure
 SolShopStockTest and Windows build-script syntax checks pass. Runtime code
 is unchanged. Windows Ninja now uses `-k 0` to report all independent compile
 failures in one run; failures still produce a nonzero exit. Native retry follows.
+
+
+**Complete compile diagnostics.** Windows run
+[213](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/actions/runs/213)
+on `08c6b5c` compiles all independent targets and exposes only two remaining
+`maybe-uninitialized` fixtures: StoryAwayBannerTest's layout and
+StoryStepAwayTransportTest's peer status. Invalid NaN layout values and
+zero/disconnected peer defaults retain all assertions while making the initial
+state explicit. Both focused tests and the all-target cross-build pass after
+this change. No gameplay or protocol behavior changes; native retry follows.

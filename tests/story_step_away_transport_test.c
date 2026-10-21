@@ -62,7 +62,7 @@ int main(void) {
     memset(config.game_hash,0x25,32); host=SudekiMpLanPartyCreate(&config); assert(host);
     config.local_seat=1; config.host_ipv4="127.0.0.1"; config.port=SudekiMpLanPartyPort(host);
     client=SudekiMpLanPartyCreate(&config); assert(client);
-    SudekiMpLanPartyPeerStatus h,c; BOOL ready=FALSE;
+    SudekiMpLanPartyPeerStatus h={0},c={0}; BOOL ready=FALSE;
     for(unsigned i=0;i<400 && !ready;++i) {
         poll(); assert(SudekiMpLanPartyPeerStatusGet(host,1,&h)); assert(SudekiMpLanPartyPeerStatusGet(client,1,&c));
         ready=h.phase==SUDEKIMP_LAN_PARTY_OBSERVING && h.transport_confirmed && c.phase==SUDEKIMP_LAN_PARTY_OBSERVING;
