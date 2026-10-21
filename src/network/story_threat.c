@@ -172,6 +172,7 @@ static uint32_t threat_elapsed(uint32_t now,uint32_t then) {
 }
 static int threat_due(uint32_t now,uint32_t until) {return (int32_t)(now-until)>=0;}
 static int threat_level(unsigned level,unsigned minimum) {return level>=minimum && level<=STORY_TARGET_TIER2;}
+int SudekiMpStoryThreatSameGroup(uint32_t a,uint32_t b) {return a && b && a==b;}
 int SudekiMpStoryThreatSubstitutable(const SudekiMpStoryThreatRecord *r) {
     return r && (!r->mode_seen || threat_mode(r->last_mode));
 }

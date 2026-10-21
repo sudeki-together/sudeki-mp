@@ -1,3 +1,4 @@
+#include "network/story_arrival.h"
 #include "hooks/lan_story_host_control.h"
 #include "hooks/lan_story_task_trace.h"
 #include "hooks/lan_story_control.h"
@@ -44,6 +45,24 @@ static const uint8_t none_code[]={0x56,0x8b,0xf1,0xc7,0x81,0x84,0,0,0,
 static const uint8_t all_code[]={0x56,0x8b,0xf1,0xc7,0x81,0x84,0,0,0,
     1,0,0,0,0xe8,0xde,0x05,0x02,0,0x5e,0xc3};
 
+static struct {
+    SudekiMpLanStoryNativeRoster roster;
+    BOOL enabled,remote;
+} lead_policy;
+static BOOL lead_scope(const SudekiMpLanStoryNativeRoster *r) {
+    const SudekiMpLanStoryNativeRoster *a=&lead_policy.roster;
+    return lead_policy.enabled && r && r->world==a->world && r->group==a->group &&
+        r->controller==a->controller && r->actors[2]==a->actors[2] && r->ai[2]==a->ai[2] &&
+        ((r->available_mask==4u && r->leader_character==2u) ||
+         (r->available_mask==12u && (r->leader_character==3u || r->leader_character==2u)));
+}
+BOOL SudekiMpLanStoryHostControlRemoteLead(const SudekiMpLanStoryNativeRoster *r) {
+    return lead_scope(r) && r->available_mask==4u && lead_policy.remote;
+}
+BOOL SudekiMpLanStoryHostControlTemporaryLead(const SudekiMpLanStoryNativeRoster *r) {
+    return lead_scope(r) && r->available_mask==4u && !lead_policy.remote;
+}
+static BOOL lead_input_guard(void *controller);
 static BOOL readable(const void *p,size_t n) {
     MEMORY_BASIC_INFORMATION m; uintptr_t a=(uintptr_t)p;
     if(!p || !n || a>UINTPTR_MAX-n || !VirtualQuery(p,&m,sizeof(m)) ||
@@ -120,7 +139,7 @@ static BOOL owner_matches(const SudekiMpLanStoryNativeRoster *r) {
     /* The observer epoch is the exterior lifetime: a split-area TEMP changes
      * the current descriptor without replacing the world or party. */
     return !input_owner.owned || (input_owner.world==r->world &&
-        (input_owner.descriptor==r->descriptor || input_owner.epoch==r->epoch) && input_owner.group==r->group &&
+        (input_owner.descriptor==r->descriptor || input_owner.epoch==r->epoch || lead_scope(r)) && input_owner.group==r->group &&
         input_owner.controller==r->controller);
 }
 static BOOL binding_exact(const SudekiMpControlUpdateDispatchWitness *w,
@@ -134,7 +153,7 @@ static BOOL binding_exact(const SudekiMpControlUpdateDispatchWitness *w,
         if(!readable(a,0x98u) || *(void **)(a+0x94u)!=ai || !readable(ai,0x174u) ||
             *(void **)ai!=base+0x2d4924u || *(void **)(ai+0x10u)!=a ||
             !readable(mode=*(uint8_t **)(ai+0x3cu),0xcu)) return FALSE;
-        if(allow_remote && c!=r->leader_character &&
+        if(allow_remote && (c!=r->leader_character || SudekiMpLanStoryHostControlRemoteLead(r)) &&
             SudekiMpLanStoryControlActorOwned(w,r,c)) continue;
         if(*(int16_t *)(ai+0x16au)!=0 ||
             mode[0xbu]!=(c==r->leader_character?0u:1u)) return FALSE;
@@ -198,6 +217,91 @@ static BOOL menus_clear(void) {
         readable(speed,0x2cu) && !speed[0x28u] && !*(uint16_t *)(speed+0x2au) &&
         !*(int *)(speed+0x20u) && !*(int *)(speed+0x24u);
 }
+/* Supported controller tail (427cf0 -> 4285c9) commits pending mode only
+ * AFTER input events. SetFilterNone itself only queues +84 and clears edges.
+ * Settle our own ordinary->None edge before that consumer, reproducing the
+ * native current-mode write and camera-input notification. No foreign mode
+ * is committed, and the ordinary native All tail remains the release path. */
+static void __attribute__((naked,noinline,regparm(0))) lead_camera_input_none(void *entry,void *manager) {
+    (void)entry;(void)manager;
+    __asm__ volatile("movl 4(%esp),%edx\n\tpushl 8(%esp)\n\txorl %eax,%eax\n\tcall *%edx\n\tret\n\t");
+}
+static BOOL lead_settle_entries_exact(void) {
+    static const uint8_t tail[]={0x8b,0x83,0x84,0,0,0,0x3b,0x83,0x80,0,0,0,0x74,0x26,0x89,0x83,0x80,0,0,0};
+    static const uint8_t camera_entry[]={0x53,0x55,0x8b,0x6c,0x24,0x0c,0x56,0x57};
+    return !memcmp(base+0x285c9u,tail,sizeof(tail)) &&
+        !memcmp(base+0x285f8u,"\xe8\x53\x06\x01\x00",5u) &&
+        !memcmp(base+0x38c50u,camera_entry,sizeof(camera_entry)) &&
+        !memcmp(base+0x38c8bu,"\xc2\x04\x00",3u);
+}
+static BOOL lead_settle_none(uint8_t *c,const SudekiMpLanStoryNativeRoster *r) {
+    if(!input_owner.owned || !owner_matches(r) || !entries_exact() ||
+        *(int *)(c+0x80u)!=1 || *(int *)(c+0x84u)!=0 || !lead_settle_entries_exact()) return FALSE;
+    uint8_t *manager=*(uint8_t **)(base+0x409d7cu);
+    if(manager) {
+        if(!readable(manager,0x60u) || *(void **)manager!=base+0x2c7b80u) return FALSE;
+        for(unsigned i=0;i<10u;++i) {
+            uint8_t *camera=*(uint8_t **)(manager+0x24u+i*4u);
+            if(camera && (!readable(camera,0x10cu) || *(void **)camera!=base+0x2cce5cu)) return FALSE;
+        }
+    }
+    *(int *)(c+0x80u)=0;
+    if(manager) {active=TRUE;lead_camera_input_none(base+0x38c50u,manager);active=FALSE;}
+    return entries_exact() && *(void **)(base+0x408da4u)==c &&
+        *(void **)(base+0x409d7cu)==manager && *(int *)(c+0x80u)==0 && *(int *)(c+0x84u)==0;
+}
+/* This is the existing separation adapter's verified pre-original callback,
+ * after any noncaster restoration. It never borrows a script-owned None.
+ * Unknown identity/entry on our still-bound controller quarantines the call. */
+static BOOL lead_input_guard(void *controller) {
+    if(!base || !lead_policy.enabled || !lead_policy.remote || stopping) return TRUE;
+    const SudekiMpLanStoryNativeRoster *r=&lead_policy.roster;
+    if(!input_owner.owned && !SudekiMpLanStoryControlRetains() &&
+        readable(base+0x408d10u,4u) && *(void **)(base+0x408d10u)!=r->world) return TRUE;
+    if(!native_thread || native_thread!=GetCurrentThreadId() || controller!=r->controller) return FALSE;
+    if(!readable(base+0x408da4u,4u) || *(void **)(base+0x408da4u)!=controller ||
+        !readable(controller,0x24cu) || *(void **)controller!=base+CONTROLLER_VT ||
+        *(void **)((uint8_t *)controller+0x2cu)!=base+INPUT_VT) return FALSE;
+    if(*(void **)((uint8_t *)controller+0x248u)!=r->actors[2]) return TRUE;
+    if(!readable(r->group,0xd0u) || !readable(r->actors[2],0x98u) ||
+        !readable(r->ai[2],0x16cu) || *(void **)r->actors[2]!=base+0x2d5010u ||
+        *(void **)r->ai[2]!=base+0x2d4924u || *(void **)((uint8_t *)r->actors[2]+0x94u)!=r->ai[2] ||
+        *(void **)((uint8_t *)r->ai[2]+0x10u)!=r->actors[2] ||
+        *(void **)(base+0x408d10u)!=r->world || *(void **)(base+0x408d94u)!=r->group ||
+        !entries_exact()) return FALSE;
+    /* Cover SetAsLead before RemovePC and AddPC before the reverse switch.
+     * Only the retained canonical Tal is fenced; this grants no acquisition. */
+    unsigned count=*(unsigned *)((uint8_t *)r->group+0xccu),matches=0;
+    if(count!=1u && count!=2u) return FALSE;
+    for(unsigned i=0;i<count;++i) if(*(void **)((uint8_t *)r->group+0x90u+i*12u)==r->actors[2]) ++matches;
+    if(matches!=1u) return FALSE;
+    uint8_t *c=controller;int current=*(int *)(c+0x80u),pending=*(int *)(c+0x84u);
+    if(current==0 && pending==0) return TRUE;
+    if(current==1 && pending==0 && input_owner.owned) return lead_settle_none(c,r);
+    if(current!=1 || pending!=1) return TRUE; /* Native modal retains its own filter. */
+    if(input_owner.owned && !owner_matches(r)) return FALSE;
+    input_owner.world=r->world;input_owner.descriptor=r->descriptor;input_owner.epoch=r->epoch;
+    input_owner.group=r->group;input_owner.controller=c;input_owner.owned=TRUE;input_owner.releasing=FALSE;
+    active=TRUE;((Filter)(base+FILTER_NONE))(c);active=FALSE;
+    if(*(int *)(c+0x80u)==1 && !lead_settle_none(c,r)) return FALSE;
+    return entries_exact() && *(void **)(base+0x408da4u)==c &&
+        *(void **)(c+0x248u)==r->actors[2] && *(int *)(c+0x80u)==0 && *(int *)(c+0x84u)==0;
+}
+BOOL SudekiMpLanStoryHostControlLeadPolicy(void *controller,
+    const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryScene *scene,
+    BOOL enabled,BOOL remote_or_retained) {
+    SudekiMpLanStoryNativeRoster r;
+    if(!enabled) {
+        if(input_owner.owned || SudekiMpLanStoryControlRetains()) return FALSE;
+        if(!SudekiMpLanPartyControlStoryLeadScope(w,NULL,FALSE)) return FALSE;
+        memset(&lead_policy,0,sizeof(lead_policy));return TRUE;
+    }
+    if(locked!=3u || !observe(controller,w,scene,&r) ||
+        !(SudekiMpStoryArrivalPair(scene) || SudekiMpStoryArrivalSolo(scene)) ||
+        !SudekiMpLanPartyControlStoryLeadScope(w,&r,TRUE)) return FALSE;
+    lead_policy.roster=r;lead_policy.enabled=TRUE;lead_policy.remote=remote_or_retained;
+    return TRUE;
+}
 static BOOL actor_idle(void *actor) {
     uint8_t *a=actor,*arbiter,*interaction,*mode; SudekiMpCharacterSkillState skill;
     BOOL weapon_pending=TRUE;
@@ -243,6 +347,7 @@ BOOL SudekiMpLanStoryHostControlInstall(HMODULE image,unsigned locked_character)
         memcmp(b+FILTER_ALL,all_code,sizeof(all_code)) || !next_supported(b)) {
         SetLastError(ERROR_INVALID_STATE); return FALSE;
     }
+    if(!SudekiMpControlSeparationStoryInputGuard(lead_input_guard)) return FALSE;
     base=b; locked=locked_character; requested=4u; native_thread=next_attempt=0;
     active=stopping=FALSE; completed_load=completed_task=0;
     memset(&input_owner,0,sizeof(input_owner)); memset(&rotation,0,sizeof(rotation));
@@ -268,6 +373,10 @@ static BOOL recruitment_ready(const SudekiMpLanStoryNativeRoster *r,
         !(out->load_generation==completed_load && out->task==completed_task);
 }
 
+/* Same native SetCameraState seam already used by the client camera.
+ * The authored room camera is Aimed at Tal. Request Exploration only after
+ * its settled native state, target and selected render owner are exact.
+ * No replacement target, hook, retained ref, or render override is created. */
 BOOL SudekiMpLanStoryHostControlService(void *controller,
     const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryScene *scene,BOOL menu_open) {
     SudekiMpLanStoryNativeRoster r;
@@ -293,6 +402,13 @@ BOOL SudekiMpLanStoryHostControlService(void *controller,
         memset(&rotation,0,sizeof(rotation));
     }
     if(stopping) { requested=4u; return input_filter(w,&r,FALSE); }
+    if(SudekiMpLanStoryHostControlRemoteLead(&r)) {
+        /* The pre-original guard owns ordinary input. A native script's
+         * None is not ours and cannot grant remote readiness. */
+        /* Keep the native authored room camera. The client borrows this
+         * view independently of the remote gameplay lease. */
+        return input_filter(w,&r,TRUE);
+    }
     if(menu_open) {
         /* The custom menu never rotates a character or borrows a foreign
          * native modal's filter. Once acquired, its exact ownership suffices
@@ -350,7 +466,7 @@ BOOL SudekiMpLanStoryHostControlBound(void *controller,
     static const char *trace; static unsigned traces;
     const char *why=stopping?"stopping":requested<4u?"requested":rotation.entered?"rotation":
         !observe(controller,w,scene,&r)?"observe":!owner_matches(&r)?"owner":
-        r.leader_character!=locked?"leader":!binding_exact(w,&r,TRUE)?"binding":
+        (r.leader_character!=locked && !lead_scope(&r))?"leader":!binding_exact(w,&r,TRUE)?"binding":
         !SudekiMpLanStoryObserverRosterStillExact(w,&r)?"roster":NULL;
     if(why!=trace && traces<48u) {
         ++traces; trace=why;
@@ -514,6 +630,8 @@ BOOL SudekiMpLanStoryHostControlUninstall(void) {
     if(!base) return TRUE;
     if(SudekiMpLanStoryHostControlRetains() || SudekiMpLanStoryControlRetains() ||
         (native_thread && native_thread!=GetCurrentThreadId())) return retain(ERROR_BUSY);
+    if(!SudekiMpControlSeparationStoryInputGuard(NULL)) return retain(ERROR_BUSY);
+    memset(&lead_policy,0,sizeof(lead_policy));
     base=NULL; native_thread=next_attempt=0; active=stopping=FALSE; locked=4u;
     memset(verified_next,0,sizeof(verified_next)); return TRUE;
 }

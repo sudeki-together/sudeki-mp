@@ -208,11 +208,13 @@ typedef struct Member {
     BOOL rejoin_pose;
     DWORD rejoin_ready_at;
     BOOL exit_armed;
+    BOOL away_inside,away_return,away_unparked;
     BOOL in_scene;   /* this member's bit is in the observer's remote mask */
     const uint8_t *exit_entity;
 } Member;
 static Member members[4];
 static BOOL entry_armed[4];
+static unsigned away_return_refusals;
 static const uint8_t *entry_entities[DOORS];
 static DWORD entry_scans[DOORS];
 static const Door *house;        /* the house in use by members, or NULL */
@@ -284,6 +286,7 @@ static void finish(unsigned c,const char *reason,BOOL outside) {
     if(m->in_scene) SudekiMpLanStoryObserverClearRemoteMembers((uint8_t)(1u<<c));
     SudekiMpLogFormat("story_remote_interior event=end zone=%s character=%u phase=%u reason=%s placed_outside=%u\r\n",
         m->door?m->door->zone:"-",c,m->phase,reason,placed);
+    if(m->away_unparked && m->phase==LOADING) (void)SudekiMpLanStorySplitParkMember(c);
     memset(m,0,sizeof(*m)); m->phase=IDLE;
     entry_armed[c]=FALSE;
     house_release(reason);
@@ -412,6 +415,10 @@ BOOL SudekiMpLanStoryRemoteInteriorInitialize(HMODULE image) {
 static BOOL member_enter(unsigned c,uint32_t now,const float *at) {
     Member *m=&members[c]; float spot[3];
     snap_off();
+    if(m->away_return) {
+        if(!SudekiMpLanStorySplitUnparkMember(c)) { finish(c,"away_unpark_refused",FALSE);return FALSE; }
+        m->away_unparked=TRUE;
+    }
     if(at) memcpy(spot,at,sizeof(spot)); else member_spot(m->door->inside,c,spot);
     if(!place(m->actor,spot)) { finish(c,"place_refused",FALSE); return FALSE; }
     if(!SudekiMpLanStoryObserverSetRemoteInterior(m->door->zone,(uint8_t)(1u<<c))) {
@@ -419,7 +426,9 @@ static BOOL member_enter(unsigned c,uint32_t now,const float *at) {
         m->phase=LOADING; /* not inside: finish must not clear the scene */
         finish(c,"scene_refused",FALSE); return FALSE;
     }
-    m->phase=INSIDE; m->in_scene=TRUE; m->rejoin_until=0; m->rejoin_pose=FALSE; m->rejoin_ready_at=0;
+    m->phase=INSIDE; m->in_scene=TRUE; m->away_unparked=FALSE;
+    if(m->away_return) m->away_inside=TRUE;
+    m->rejoin_until=0; m->rejoin_pose=FALSE; m->rejoin_ready_at=0;
     m->since=now?now:1u; m->exit_armed=FALSE; m->exit_entity=NULL; m->exit_scan=0; m->exit_at=0;
     SudekiMpLogFormat("story_remote_interior event=inside zone=%s character=%u members=%u snap_was=%u\r\n",
         m->door->zone,c,(unsigned)members_mask(INSIDE),(unsigned)snap_before);
@@ -513,6 +522,9 @@ static void member_service(unsigned c,const SudekiMpLanStoryNativeRoster *roster
     /* Seen by the lead in her own shop (D11); hidden natively elsewhere. */
     if(lead_here) (void)SudekiMpLanStorySplitShowMember(roster,c);
     else SudekiMpLanStorySplitReleaseMember(c,"lead_elsewhere");
+    /* An away body already inside the lead's shop stays under native AI;
+     * only lead eviction can take it out. Return clears this flag. */
+    if(m->away_inside) {m->exit_at=0;m->stale_since=0;return;}
     /* A client that cannot present the house sends no input: end the visit
      * (placed outside) rather than hold an unplayable member inside. */
     if(input_fresh&(1u<<c)) m->stale_since=0;
@@ -541,11 +553,77 @@ static void member_service(unsigned c,const SudekiMpLanStoryNativeRoster *roster
     }
 }
 
+static BOOL away_body_standing(const SudekiMpLanStoryNativeRoster *r,unsigned c) {
+    if(!r || c>=4u || !(r->available_mask&(1u<<c)) || !r->actors[c]) return FALSE;
+    const uint8_t *ai=r->ai[c],*actor=r->actors[c],*arb;
+    return readable(ai,0x48) && readable(actor,0x98) && *(void *const *)(ai+0x10)==actor &&
+        *(void *const *)(actor+0x94)==ai && !(*(uint32_t *)(ai+0x44)&0x58) &&
+        readable(arb=*(const uint8_t *const *)(actor+0x90),0x54) &&
+        *(void *const *)(arb+0x10)==actor && !(*(uint32_t *)(arb+0x50)&0x10000);
+}
+void SudekiMpLanStoryRemoteInteriorAwayDrained(const SudekiMpLanStoryNativeRoster *r,
+    const SudekiMpLanStoryScene *s,unsigned c) {
+    if(!ready || !r || !s || c>=4u || c==r->leader_character || !SudekiMpLanStorySplitActive()) return;
+    Member *m=&members[c];
+    /* member_enter may have updated the observer after this frame's scene
+     * snapshot. The coordinator's visit state must not be parked again. */
+    if(m->phase==INSIDE || m->phase==LOADING || m->away_return) {
+        if(m->phase==INSIDE && m->actor==r->actors[c] && m->epoch==s->epoch) {
+            m->away_inside=TRUE;m->exit_at=0;
+        }
+        return;
+    }
+    if(!(s->inside_mask&(1u<<c)) && away_body_standing(r,c)) (void)SudekiMpLanStorySplitParkMember(c);
+}
+void SudekiMpLanStoryRemoteInteriorCancelAwayReturn(unsigned c) {
+    /* Only this synchronous lead-shop wait, never a native background task. */
+    if(c<4u && members[c].away_return && members[c].phase==LOADING)
+        finish(c,"away_return_cancelled",FALSE);
+}
+int SudekiMpLanStoryRemoteInteriorAwayReturn(const SudekiMpLanStoryNativeRoster *r,
+    const SudekiMpLanStoryScene *s,unsigned c,uint32_t now) {
+    if(!ready || !r || !s || c>=4u || c==r->leader_character) return -1;
+    Member *m=&members[c];
+    if(!SudekiMpLanStorySplitMemberParked(c) && !(m->phase==INSIDE && m->away_inside) &&
+        !(m->away_return && m->phase==LOADING)) return 1;
+    if(s->phase!=SUDEKIMP_LAN_STORY_READY) return -1;
+    if(SudekiMpLanStoryObserverHolding()) return 0;
+    if(!SudekiMpLanStoryObserverNativeRosterExact(r)) return -1;
+    if(m->phase==INSIDE && m->away_inside && m->actor==r->actors[c] && m->epoch==s->epoch) {
+        if(SudekiMpLanStorySplitMemberParked(c)) {
+            snap_off();
+            if(!SudekiMpLanStorySplitUnparkMember(c) || SudekiMpLanStorySplitMemberParked(c)) return 0;
+        }
+        if(SudekiMpLanStorySplitShowMember(r,c)<=0) return 0;
+        m->away_inside=m->away_return=FALSE;return 1;
+    }
+    if(m->away_return && m->phase==LOADING) return 0;
+    if(!SudekiMpLanStorySplitMemberParked(c)) return 1;
+    if(!away_body_standing(r,c)) {
+        if(away_return_refusals<32u) {++away_return_refusals;
+            SudekiMpLogFormat("story_remote_interior event=away_return_refused character=%u reason=body_not_standing\r\n",c);}
+        return -1;
+    }
+    if(!SudekiMpLanStorySplitActive() || house_draining || m->phase!=IDLE) return -1;
+    BOOL lead_inside=r->leader_character<4u && (s->inside_mask&(1u<<r->leader_character));
+    const Door *door=lead_inside?door_for(s->temporary):NULL;
+    if(!door) return SudekiMpLanStorySplitUnparkMember(c)?1:-1; /* story house: return outside */
+    if(house && house!=door) return -1;
+    *m=(Member){.phase=LOADING,.door=door,.actor=r->actors[c],.epoch=s->epoch,.since=now?now:1u,.away_return=TRUE};
+    if(!house) {house=door;house_loaded_by_us=FALSE;SudekiMpLanStoryObserverSetRemoteVisit(door->zone);}
+    SudekiMpLogFormat("story_remote_interior event=away_return_entry zone=%s character=%u\r\n",door->zone,c);
+    return 0; /* presence remains away until member_enter positively completes */
+}
+const char *SudekiMpLanStoryRemoteInteriorPlaceName(const char *zone) {
+    if(zone && door_for(zone)) return "Kamo's shop";
+    if(zone && !_stricmp(zone,"LICo_Frappe_Farm")) return "the farmhouse";
+    return "the house";
+}
 /* This gate governs new entries only. Existing visits still drain/exit,
  * including visits accepted before PRESENCE changed. */
 static BOOL entry_member_admitted(unsigned c,const SudekiMpLanStoryNativeRoster *roster,
     const SudekiMpLanStoryScene *scene,uint8_t remote_characters) {
-    return !SudekiMpLanStoryRuntimeCharacterAway(c) && members[c].phase==IDLE &&
+    return SudekiMpLanStoryRuntimeCharacterAwayState(c)==0 && members[c].phase==IDLE &&
         c!=roster->leader_character && (remote_characters&(1u<<c)) &&
         (roster->available_mask&(1u<<c)) && !(scene->inside_mask&(1u<<c));
 }

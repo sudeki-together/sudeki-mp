@@ -1300,7 +1300,7 @@ BOOL SudekiMpLanStoryClientUiPresent(SudekiMpLanStoryClientPresentation callback
      * scheduler, roster, input or full-pause checks for UI. */
     return SudekiMpLanStoryClientEffectsPresent(callback,context,witness,witness_context);
 }
-BOOL SudekiMpLanStoryClientObserveDispatch(const SudekiMpControlUpdateDispatchWitness *w,
+static BOOL client_present_dispatch(const SudekiMpControlUpdateDispatchWitness *w,
     SudekiMpLanStoryClientPresentation callback,void *context) {
     if(!w || !callback || residency_witness || residency_call.active || residency_call.failed ||
         effects_witness || recruit_commit_witness || presentation_active || recruiting ||
@@ -1311,6 +1311,16 @@ BOOL SudekiMpLanStoryClientObserveDispatch(const SudekiMpControlUpdateDispatchWi
     BOOL result=SudekiMpLanStoryClientPresent(callback,context);
     residency_witness=NULL;
     return result;
+}
+BOOL SudekiMpLanStoryClientObserveDispatch(const SudekiMpControlUpdateDispatchWitness *w,
+    SudekiMpLanStoryClientPresentation callback,void *context) {
+    return client_present_dispatch(w,callback,context);
+}
+BOOL SudekiMpLanStoryClientRestoreViewDispatch(const SudekiMpControlUpdateDispatchWitness *w,
+    SudekiMpLanStoryClientPresentation callback,void *context) {
+    /* Same fresh controller witness and full pre/post containment proof.
+     * Restore a retained view only; MoviePlay begins after this scope closes. */
+    return client_present_dispatch(w,callback,context);
 }
 BOOL SudekiMpLanStoryClientEffectsPresent(SudekiMpLanStoryClientPresentation callback,
     void *context,SudekiMpLanStoryClientEffectsWitness witness,void *witness_context) {

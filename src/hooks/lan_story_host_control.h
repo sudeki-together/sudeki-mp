@@ -8,6 +8,14 @@
  * filtering for the custom menu and validated native party rotation for
  * host-approved swaps. The closed Lighthouse journal separately authorizes
  * restoring Tal after recruitment. It never writes actor/controller/group identity fields. */
+/* Default-off castle arrival scope, supplied on an exact native dispatch.
+ * remote_or_retained keeps host input closed until a disconnected lease is
+ * actually drained. A reservation survives temporary host control. */
+BOOL SudekiMpLanStoryHostControlLeadPolicy(void *controller,
+    const SudekiMpControlUpdateDispatchWitness *,const SudekiMpLanStoryScene *,
+    BOOL enabled,BOOL remote_or_retained);
+BOOL SudekiMpLanStoryHostControlRemoteLead(const SudekiMpLanStoryNativeRoster *);
+BOOL SudekiMpLanStoryHostControlTemporaryLead(const SudekiMpLanStoryNativeRoster *);
 BOOL SudekiMpLanStoryHostControlInstall(HMODULE image,unsigned locked_character);
 /* Sample the scene with StoryObserver first on this exact post-controller
  * dispatch. FALSE means pending/unknown or a native rotation occurred: do not

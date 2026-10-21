@@ -10,7 +10,10 @@
 BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig *config);
 BOOL SudekiMpUninstallLanStoryRuntime(void);
 void SudekiMpLanStoryRuntimeSetStepAway(BOOL enabled);
+void SudekiMpLanStoryRuntimeSetClientLeadSpectate(BOOL enabled);
 BOOL SudekiMpLanStoryRuntimeStepAwayEnabled(void);
+/* -1 unknown, 0 present/not-away, 1 away. Entry admission fails closed; displays do not. */
+int SudekiMpLanStoryRuntimeCharacterAwayState(unsigned character);
 BOOL SudekiMpLanStoryRuntimeCharacterAway(unsigned character);
 /* Host game-thread proof of a connected away seat after native control has
  * drained. The expected transport lease prevents reusing a prior connection. */

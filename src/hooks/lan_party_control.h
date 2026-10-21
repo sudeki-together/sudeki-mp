@@ -302,4 +302,8 @@ typedef BOOL (*SudekiMpLanPartyTestInitialize)(unsigned int seat);
 void SudekiMpLanPartyControlTestRosterCalls(SudekiMpLanPartyTestWorld world,
     SudekiMpLanPartyTestSpawn spawn, SudekiMpLanPartyTestInitialize initialize);
 #endif
+/* Exact host adapter role scope. NULL retires only after all native leases
+ * drain. Keeps the ordinary non-lead API unchanged when disabled. */
+BOOL SudekiMpLanPartyControlStoryLeadScope(const SudekiMpControlUpdateDispatchWitness *,
+    const struct SudekiMpLanStoryNativeRoster *,BOOL enabled);
 #endif

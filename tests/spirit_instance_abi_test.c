@@ -101,8 +101,10 @@ static void __attribute__((naked,noinline,regparm(1))) invoke_ui_bridge(BOOL acq
         "1: call _remote_ui_release_bridge\n\t2: popl %ebp\n\tpopl %ebx\n\tpopl %esi\n\tret\n\t");
 }
 static unsigned int participant_locks, participant_unlocks, ready_calls;
+static BOOL caster_epoch_known=TRUE;
+static BOOL epoch_unknown(void) {return TRUE;}
 static BOOL caster_witness(void *actor,uint64_t session) {
-    return session==17 && (actor==caster_actors[0] || actor==caster_actors[1]);
+    return caster_epoch_known && session==17 && (actor==caster_actors[0] || actor==caster_actors[1]);
 }
 static BOOL local_input_witness(void *actor,uint64_t session) {
     return local_witness_valid && session==17 && actor==caster_actors[0];
@@ -504,6 +506,7 @@ static SudekiMpSpiritInstance selection_expected_scope;
 static void __attribute__((thiscall)) fake_named_update(void *node,void *args) {
     SudekiMpSpiritInstance observed;
     CHECK(node && args==&selection_update_count);
+    if(update_fault) {CHECK(host_pass_through());++selection_update_count;return;}
     CHECK(SudekiMpObserveSpiritInstanceScope(&observed));
     CHECK(observed.generation==selection_expected_scope.generation);
     ++selection_update_count;
@@ -563,6 +566,9 @@ static void selection_tests(void) {
         CHECK(SudekiMpBindSpiritInstanceCaster(&pair[i],caster_actors[i],i ? 14:5,17,caster_witness));
         CHECK(SudekiMpEnableSpiritInstanceNamedCameras(&pair[i]));
     }
+    caster_epoch_known=FALSE;SudekiMpSpiritInstanceSetUnknownWitness(epoch_unknown);
+    CHECK(identity_transient());update_fault=TRUE;CHECK(!identity_transient());update_fault=FALSE;
+    SudekiMpSpiritInstanceSetUnknownWitness(NULL);CHECK(!identity_transient());caster_epoch_known=TRUE;
     CHECK(!SudekiMpEnableSpiritInstanceRemoteCameraSelection(&pair[1]));
     CHECK(SudekiMpInstallSpiritInstanceNamedCameraUpdates());
     CHECK(!SudekiMpInstallSpiritInstanceNamedCameraUpdates());
@@ -635,6 +641,17 @@ static void selection_tests(void) {
     named_camera_update(named_base[0]+8,&selection_update_count);
     CHECK(!update_fault && selection_update_count==2);
     CHECK(SudekiMpLeaveSpiritInstance(a));
+    update_fault=TRUE;unsigned saved_count=selection_update_count;
+    named_camera_update(named_base[0]+8,&selection_update_count);
+    CHECK(selection_update_count==saved_count+1 && update_fault);
+    named_camera_update((uint8_t *)entries[1].named_cameras[1]+8,&selection_update_count);
+    CHECK(selection_update_count==saved_count+1);
+    *(void **)(image+MANAGER_GLOBAL)=pair[0].manager;
+    named_camera_update(named_base[0]+8,&selection_update_count);CHECK(selection_update_count==saved_count+1);
+    *(void **)(image+MANAGER_GLOBAL)=primary_manager;
+    ++operation_depth;named_camera_update(named_base[0]+8,&selection_update_count);--operation_depth;
+    CHECK(selection_update_count==saved_count+1);
+    update_fault=FALSE;selection_update_count=saved_count;
     spirit_camera_ready_original=fake_camera_ready;
     spirit_camera_animation_original=fake_camera_animation;
     /* Completion outside a task/update still configures the owning private
@@ -1614,6 +1631,21 @@ int main(void) {
             {
                 ControllerFilterFunction none=(ControllerFilterFunction)(image+0x8ac0);
                 ControllerFilterFunction all=(ControllerFilterFunction)(image+0x8ae0);
+                update_fault=TRUE;
+                CHECK(host_pass_through());
+                *(uint32_t *)(foreign_controller+0x84)=2; *(uint32_t *)(foreign_controller+0x88)=0;
+                none(foreign_controller); all(foreign_controller);
+                CHECK(*(uint32_t *)(foreign_controller+0x84)==2 && !*(uint32_t *)(foreign_controller+0x88));
+                CHECK(SudekiMpSpiritInstanceFilterNoneEntryExact((HMODULE)image));
+                CHECK(SudekiMpSpiritInstanceFilterAllEntryExact((HMODULE)image));
+                none(fake_controller);CHECK(!*(uint32_t *)(fake_controller+0x84));
+                all(fake_controller);CHECK(*(uint32_t *)(fake_controller+0x84)==1);
+                *(void **)(image+MANAGER_GLOBAL)=instances[1].manager;
+                CHECK(!SudekiMpSpiritInstanceFilterNoneEntryExact((HMODULE)image));
+                CHECK(!SudekiMpSpiritInstanceFilterAllEntryExact((HMODULE)image));
+                none(fake_controller);CHECK(*(uint32_t *)(fake_controller+0x84)==1);
+                *(void **)(image+MANAGER_GLOBAL)=primary_manager;update_fault=FALSE;
+
                 interior_filter_observations=0;
                 *(uint32_t *)(fake_controller+0x84)=2; *(uint32_t *)(fake_controller+0x88)=0;
                 remote=SudekiMpEnterSpiritInstance(&instances[1]); CHECK(remote);

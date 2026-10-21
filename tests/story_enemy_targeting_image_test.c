@@ -3,14 +3,27 @@
 static BOOL clock_forced;
 static DWORD clock_tick;
 static DWORD test_tick(void) {return clock_forced?clock_tick:GetTickCount();}
+/* Observe the feed contract while still executing the real pure helper.
+ * Spirit's hit-all exclusion also overlaps the adapter's non-ranged flag. */
+#include "network/story_threat.h"
+static struct {int ranged,known,hit_all,firing;} hit_feed;
+static SudekiMpStoryThreatHitAdded capture_hit_feed(const SudekiMpStoryThreatConfig *c,
+    int coop,unsigned type,int excluded,SudekiMpStoryThreatRecord *r,unsigned seat,unsigned kind,
+    float amount,float hp,int ranged,int known,int hit_all,int firing,int unengaged,int far_hit,uint32_t now) {
+    hit_feed.ranged=ranged;hit_feed.known=known;hit_feed.hit_all=hit_all;hit_feed.firing=firing;
+    return SudekiMpStoryThreatAddHit(c,coop,type,excluded,r,seat,kind,amount,hp,ranged,known,hit_all,firing,unengaged,far_hit,now);
+}
 #define GetTickCount test_tick
+#define SudekiMpStoryThreatAddHit capture_hit_feed
 #include "../src/hooks/story_enemy_targeting.c"
+#undef SudekiMpStoryThreatAddHit
 #undef GetTickCount
 #include <assert.h>
 #include <stdlib.h>
 #include <stdarg.h>
 static uint8_t *image;
 static BOOL proof=TRUE,lease_known=TRUE,lease_departed,spirit_fixture;
+static BOOL spirit_known_fixture=TRUE;
 static BOOL control_proof=TRUE,session_proof=TRUE,noncap_allowed=TRUE;
 static BOOL away_proof=TRUE;
 static BOOL companion_proof=TRUE;
@@ -54,7 +67,7 @@ BOOL SudekiMpLanStorySpawnLeasesObserve(SudekiMpStorySpawnLeaseObservation *o,un
 }
 static uint32_t shot_sequences[4],shot_ticks[4];
 BOOL SudekiMpLanStoryShotsLatest(unsigned c,uint32_t *s,uint32_t *t) {*s=shot_sequences[c];*t=shot_ticks[c];return TRUE;}
-BOOL SudekiMpLanStoryCastSpiritInFlight(unsigned c,BOOL *a) {(void)c;*a=spirit_fixture;return TRUE;}
+BOOL SudekiMpLanStoryCastSpiritInFlight(unsigned c,BOOL *a) {(void)c;*a=spirit_fixture;return spirit_known_fixture;}
 BOOL SudekiMpLanPartyProjectileDamageMatch(void *a,void *d,BOOL *m) {(void)a;(void)d;*m=FALSE;return TRUE;}
 static unsigned install_call,fail_install;
 BOOL __real_SudekiMpInstallInlineHook(SudekiMpInlineHook *,uint8_t *,const uint8_t *,size_t,const void *);
@@ -749,6 +762,7 @@ static void tier_advance(uint32_t delta) {
     while(delta) {uint32_t step=delta>250?250:delta;tier_service(step);delta-=step;}
 }
 static void tier_fixture(unsigned level) {
+    spirit_fixture=FALSE;spirit_known_fixture=TRUE;
     multiple_leases=FALSE;leased_actor=NULL;lease_known=TRUE;lease_departed=FALSE;
     companion_fixture();clock_forced=TRUE;clock_tick=1000000;
     SudekiMpStoryThreatDefaults(&config);config.level=level;effective_level=SudekiMpStoryThreatEffectiveLevel(&config);
@@ -795,14 +809,17 @@ static void *tier_select(unsigned enemy,unsigned mode) {
     tier_request[0x24]=(uint8_t)mode;void *out=NULL;
     assert(((SelectFn)(image+SELECTOR))(tier_request,&out,eu[enemy],30)==&out);return out;
 }
-static Hit tier_hit(unsigned enemy,unsigned shooter,float damage,int firing) {
+static Hit tier_hit_mode(unsigned enemy,unsigned shooter,float damage,int firing,unsigned arbiter_mode) {
     uint8_t packet[0x68]={0};Hit h={0};
     *(void **)packet=image+0x2d9148;*(void **)(packet+0x30)=ca[shooter];
-    *(unsigned *)(cb[shooter]+0x58)=0x20;firing_signal[shooter]=(unsigned)firing;
+    *(unsigned *)(cb[shooter]+0x58)=arbiter_mode;firing_signal[shooter]=(unsigned)firing;
     *(float *)(tier_stats[enemy]+0x2c)=100;
     assert(hit_observe(tier_combat[enemy],packet,FALSE,&h));
     *(float *)(tier_stats[enemy]+0x2c)=100-damage;
     assert(hit_observe(tier_combat[enemy],packet,TRUE,&h));return h;
+}
+static Hit tier_hit(unsigned enemy,unsigned shooter,float damage,int firing) {
+    return tier_hit_mode(enemy,shooter,damage,firing,0x20);
 }
 static void tier_alert_fixture(unsigned level) {
     tier_fixture(level);eu[1][0x46]=eu[2][0x46]=1;tier_firing[1]=1;tier_service(0);
@@ -838,7 +855,13 @@ static void tier_seam_tests(void) {
     assert(record_of(1)->alerting[0].active && r->responding[0].active && r->responding[0].shooter==1);
     assert(record_of(1)->alerting[0].responders[0]==2 && record_of(1)->alerting[0].responders[1]==3 && record_of(1)->alerting[0].responders[2]==1);
     memcpy(self_before,eu,sizeof(eu));memcpy(request_before,tier_request,sizeof(tier_request));
-    noncap_calls=0;for(unsigned i=0;i<10;++i) assert(tier_select(1,0)==cu[1]);assert(noncap_calls==10);
+    /* Review 4: successful rechecks survive the following maintenance pass. */
+    noncap_calls=0;
+    for(unsigned i=0;i<10;++i) {
+        assert(tier_select(1,0)==cu[1]);tier_service(100);
+        assert(r->responding[0].active && !r->responding[0].recheck_failed);
+    }
+    assert(noncap_calls==10);
     assert(!memcmp(self_before,eu,sizeof(eu)) && !memcmp(request_before,tier_request,sizeof(tier_request)));
     *(unsigned *)(image+0x3c30ac)=0xffffffff;uint32_t blocked=lock_blocked;
     assert(tier_select(1,14)==cu[0] && lock_blocked==blocked+1 && r->lock_blocked==1);
@@ -983,6 +1006,93 @@ static void tier_aware_tests(void) {
     seat_frames[1].position_unknown=TRUE;assert(!aware_pick(1,0));
 #undef AWARE_REFUSES
 }
+/* Review 1: loss of position does not turn own engagement into another's. */
+static void tier_unknown_push_position_test(void) {
+    tier_push_fixture(STORY_TARGET_TIER2);
+    assert(push_states[1][0].active && push_states[1][0].serial==6);
+    *(uintptr_t *)(eu[5]+0xc0)=(uintptr_t)cu[1]+4;
+    *(void **)(ep[5]+0x10)=NULL;tier_service(1);
+    assert(push_states[1][0].active && table_complete && seat_frames[1].engaged==1);
+    EnemyFrame *u=frame_of(6);assert(u && u->position_unknown && isnan(u->x) && isnan(u->z));
+    assert(!responder_close(1,6));
+    tier_advance(7998);assert(push_states[1][0].active);
+    tier_service(1);assert(!push_states[1][0].active);
+    assert(log_count("event=push_end reason=expired seat=1 serial=6 watch=0"));
+    assert(!log_count("event=push_end reason=engaged seat=1 serial=6 watch=0"));
+    /* Unknown origin/candidate positions cannot supply recruitment distances. */
+    tier_fixture(STORY_TARGET_TIER2);eu[5][0x46]=1;
+    config.value[STORY_ALERT_MELEE]=0;config.value[STORY_ALERT_RANGED]=1;
+    *(void **)(ep[5]+0x10)=NULL;*(uintptr_t *)(eu[5]+0xf4)=1;tier_service(0);
+    assert(frame_of(6)->position_unknown && !aware_pick(1,0));
+    tier_hit(0,1,30,1);assert(!record_of(1)->alerting[0].active && !record_of(6)->responding[0].active);
+    /* Exercise explicit guards independently of the NaN representation. */
+    u=frame_of(6);u->x=20;u->z=0;
+    assert(!responder_close(1,6) && !aware_pick(1,0));
+    raise_alert(record_of(1),1,STORY_SEAT_REMOTE,1,clock_tick);
+    assert(!record_of(1)->alerting[0].active);
+    u=frame_of(1);u->position_unknown=1;frame_of(6)->position_unknown=0;
+    raise_alert(record_of(1),1,STORY_SEAT_REMOTE,1,clock_tick);
+    assert(!record_of(1)->alerting[0].active);
+}
+/* Review 5: positive walk retirement, independently through manager and lease. */
+static void tier_push_retirement_tests(void) {
+    for(unsigned departed=0;departed<2;++departed) {
+        tier_push_fixture(STORY_TARGET_TIER2);
+        assert(push_states[1][0].active && push_states[1][0].serial==6);
+        if(departed) test_leases[5].departed=TRUE;
+        else *(uintptr_t *)(cl+9*12)=0;
+        tier_service(1);
+        assert(!record_of(6) && !push_states[1][0].active);
+        assert(log_count("event=push_end reason=invalid seat=1 serial=6 watch=0"));
+    }
+}
+/* Review 6: native fields and exclusion inputs, not edits to derived flags. */
+static void tier_walk_filter_tests(void) {
+    for(unsigned target=0;target<2;++target) {
+        tier_fixture(STORY_TARGET_TIER2);
+        if(target) {*(uintptr_t *)(eu[5]+0xf4)=1;*(uintptr_t *)(eu[5]+0xc0)=(uintptr_t)cu[0]+4;}
+        tier_firing[1]=1;tier_service(0);tier_advance(5000);
+        assert(!push_states[1][0].active && !frame_of(6)->aware);
+        /* Non-aware blocks Aware pushes, not alert recruitment; no awareness
+         * requirement is added to the accepted alert responder policy. */
+    }
+    for(unsigned resource=0;resource<2;++resource) {
+        tier_fixture(STORY_TARGET_TIER2);strcpy(config.excluded,"AB");
+        uint32_t name[2]={0,(uint32_t)(uintptr_t)"AB"};
+        if(resource) test_leases[5].resource=4290;
+        else *(void **)(ea[5]+0x38)=name;
+        eu[5][0x46]=1;*(uintptr_t *)(eu[5]+0xf4)=1;
+        config.value[STORY_ALERT_MELEE]=0;config.value[STORY_ALERT_RANGED]=1;
+        tier_firing[1]=1;tier_service(0);tier_hit(0,1,30,1);
+        assert(!record_of(1)->alerting[0].active && !record_of(6)->responding[0].active);
+        tier_advance(5000);assert(!push_states[1][0].active && frame_of(6)->excluded);
+    }
+}
+/* Review 7: feed actual before/after observer captures into memory_hit. */
+static void tier_hit_mapping_tests(void) {
+    for(unsigned case_id=0;case_id<5;++case_id) {
+        tier_fixture(STORY_TARGET_TIER1);
+        spirit_fixture=case_id==2;spirit_known_fixture=case_id!=3;
+        Hit h=tier_hit_mode(0,1,30,case_id!=4,case_id==1?0:0x20);
+        SudekiMpStoryThreatRecord *r=record_of(1);
+        assert(fabsf(r->threat[1]-.3f)<.00001f);
+        assert(fabsf(r->sniper[1]-(case_id==0?.3f:0))<.00001f);
+        assert(!h.missile && h.ranged_mode==(case_id!=1));
+        assert(h.spirit_known==(case_id!=3) && h.spirit==(case_id==2) && h.firing==(case_id!=4));
+        assert(hit_feed.ranged==(case_id!=1 && case_id!=2) && hit_feed.known==(case_id!=3));
+        assert(hit_feed.hit_all==(case_id==2) && hit_feed.firing==(case_id!=4));
+    }
+}
+/* Review 8: unknown-group responders sort by distance, not a false group tie. */
+static void tier_zero_group_test(void) {
+    tier_fixture(STORY_TARGET_TIER2);test_leases[0].group_id=0;
+    test_leases[1].group_id=test_leases[3].group_id=0;
+    eu[1][0x46]=eu[2][0x46]=eu[3][0x46]=1;
+    *(float *)(ep[1]+0x44)=6;*(float *)(ep[2]+0x44)=2;*(float *)(ep[3]+0x44)=4;
+    tier_service(0);tier_hit(0,1,30,1);
+    SudekiMpStoryThreatAlerting *a=&record_of(1)->alerting[0];
+    assert(a->active && a->count==3 && a->responders[0]==3 && a->responders[1]==4 && a->responders[2]==1);
+}
 static void tier_watch_config_tests(void) {
     tier_fixture(STORY_TARGET_WATCH);native_pick=cu[1];
     assert(tier_select(0,11)==cu[1] && !noncap_calls && counters[0].would[STORY_RULE_LEAD]==1);
@@ -1074,7 +1184,9 @@ static void tier_log_bound_tests(void) {
 static void higher_tier_tests(void) {
     void *real=seams[0].trampoline;seams[0].trampoline=(void *)tier_native;
     uint8_t backup[5];memcpy(backup,image+0x1b6ec0,5);jump(0x1b6ec0,noncap);
-    tier_seam_tests();tier_feed_tests();tier_lifetime_tests();tier_aware_tests();tier_watch_config_tests();tier_log_bound_tests();
+    tier_seam_tests();tier_feed_tests();tier_lifetime_tests();tier_aware_tests();
+    tier_unknown_push_position_test();tier_push_retirement_tests();tier_walk_filter_tests();
+    tier_hit_mapping_tests();tier_zero_group_test();tier_watch_config_tests();tier_log_bound_tests();
     memcpy(image+0x1b6ec0,backup,5);FlushInstructionCache(GetCurrentProcess(),image+0x1b6ec0,5);seams[0].trampoline=real;
     multiple_leases=FALSE;clock_forced=FALSE;noncap_denied=NULL;config.level=STORY_TARGET_WATCH;effective_level=STORY_TARGET_WATCH;
     fixture();log_reset();

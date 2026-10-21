@@ -4895,20 +4895,15 @@ CONFIRMED_LIVE (two owner round trips, candidates `aa5389e0…` then `b3c2755a�
 Tal's body stays outside, control returns at once (client `native_binding_
 acknowledged` → `host_confirmed_movement`); only the brief hold is visible
 ("the same minor freeze he has always had … acceptable for now").
-(b) **Take-along path** — host logs `zone_begin method=5 … temporary=
-lico_frappe_farm`, then `host_control_drain reason=roster_unknown` and
-`load_drained seat=2`; Tal's host body is popped inside beside Ailish (live
-read: both at −166,4.4,−70, AI override 0, AI mode byte 1, arbiter idle); after
-the host leaves (`zone_begin … temporary=` empty) the offer chain reaches
-"offer_attempt" and then refuses silently every frame, so the client stays in
-`waiting_for_host_offer` and goes spectator: the "froze when I went inside"
-report. Which path runs depends on where Tal stands when Ailish enters
-(HYPOTHESIS: inside the door trigger → native take-along). Candidate
-`b3c2755a…` adds rate-limited names for the formerly silent refusals
-(`offer_begin_refused`, `offer_lease_refused`, `offer_acquire_*`;
-`story_native_control event=acquire_refused reason=generation_stale|
-slot_not_empty|body_not_idle|identity_drift|ai_override|ai_mode`). Next: owner
-reproduces (b) with Tal beside Ailish at the door; fix follows the named reason.
+(b) **RETIRED — alleged native take-along (stage 1.1, decision 5).**
+The same 2026-10-14 host log records vanilla `zone_begin method=5`, Tal
+outside and paused, and placement beside Ailish only after the TEMP exit.
+The earlier reading mistook the exterior return position for an interior
+arrival. Vanilla temporary-zone entry is lead-only; followers wait hidden
+and paused at the door. The client freeze remains a historical observation,
+but neither a farmhouse take-along nor a distance/door-trigger rule was proved.
+Members enter door-table shops through H1b. Story-house entry for members is
+still stage 2 (#93/#96); stage 1.1 Return there restores control outside.
 
 ### 2026-10-14 — #74 equipment grant accepted
 
@@ -6526,8 +6521,9 @@ Design (HYPOTHESIS until built and played):
 Open before building: a live read of a real candidate (target and trigger
 values) at a chest the host stands at. Gate ordering: the farmhouse sword
 chest is inside the farmhouse, so the chest gate needs the remote player
-inside first (H1 doors, or the native take-along path, whose 2026-10-14
-client freeze was never retested).
+inside first through a supported member-entry path. **RETIRED:** the proposed
+native take-along alternative relied on the misread 2026-10-14 record; vanilla
+temporary-zone entry is lead-only.
 
 ### 2026-10-16 — H1a remote chest use: built; owner sees a single clean open
 
@@ -6585,8 +6581,8 @@ change outside H1a's pattern:
   parks that character outside; interior pickups and chests become client
   claims that the host validates. This changes the authority model (owner
   decision required by AGENTS.md).
-- B. The native take-along: the whole party enters together (simplest; the
-  host goes in too).
+- B. **RETIRED (stage 1.1):** the proposed native whole-party entry rested on
+  the incorrect take-along claim. Vanilla temporary-zone entry is lead-only.
 - C. The host's world goes into the interior with the remote player while the
   host's own character waits outside (the host player sees the interior).
 - D. Decouple the host view and camera from the current zone (Phase G scale);
@@ -6816,11 +6812,11 @@ Saved-story profile on `codex/shared-simulation`, based on `de5facc7180b1853b9b1
 
 | Deliverable | Evidence reached and scope |
 |---|---|
-| 1.1 Pure policy | **CONFIRMED_TEST:** `StoryStepAwayTest` covers the combat judge's -16..250 ms window, READY/epoch/revision/mode proof, M precedence cross-product, phase transitions, 5 s return timeout, admission, and epoch predicate. `PartyOwnershipTest` covers HUMAN/ACQUIRING drain, no acquisition while away, disconnect reset, and unchanged-intent requests consuming their ID without a revision bump. |
+| 1.1 Pure policy | **CONFIRMED_TEST:** `StoryStepAwayTest` covers the combat judge's -16..250 ms window, READY/epoch/revision/mode proof, M precedence cross-product, phase transitions, 5 s return timeout, admission, and epoch predicate. `PartyOwnershipTest` covers HUMAN/ACQUIRING drain, no acquisition while away, disconnect reset, and unchanged-intent requests without a revision bump. **A8 correction:** this stage-1 fixture did not assert consumption of the request ID; that assertion and its rejecting mutation were added in stage 1.1. |
 | 1.2 Wire | **CONFIRMED_TEST:** saved-story gameplay profile **27**, with 26 rejected at hello. Command/presence sizes and other codecs unchanged. `LanPartySessionTest` covers the SWAP/client-PRESENCE allowlist; `StoryStepAwayTransportTest` uses real loopback UDP with discarded request and ACK datagrams, retries, duplicate suppression, no-op requests, return, and MENU-bit rejection at both queue and receive. |
 | 1.3 Host drain and return | **CONFIRMED_TEST:** actual coordinator exercised by `StoryStepAwayHostTest` with synthetic native services: `stepped_away` is the first drain reason, `offer_stepped_away` is the first offer refusal and deduplicates on repeated ticks, background/split holds defer release, eventual drain reaches AI, and clearing away reaches the ordinary Begin path. No new AI override writer. |
 | 1.3 Epoch rebind | **CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST:** `SkillTraceImageTest`'s control fixture calls the actual Begin/Acquire/Drain adapter using its real borrowed dispatch witness, supported-image signatures, and inert actors/AI calls. Held leases, copied witnesses, older/same epochs with a replaced world, and a mutated native entry refuse. After drain, a newer world epoch rebinds, acquires again with a larger lease generation, drains, and ends. Real zone-load gameplay remains **UNKNOWN**. |
-| 1.3 Death hold and H1b | **CONFIRMED_TEST:** away peers stop keeping the dead-lead hold armed **after native release**. A retained lease keeps the hold until drain completes, avoiding a lead replacement that could strand its identity. AI-only allies then leave native death/lead behavior available. `StoryAwayInteriorTest` covers the actual H1b new-entry admission gate; away members cannot initiate entries. Existing visits still service and exit. |
+| 1.3 Death hold and H1b | **RETIRED rationale (stage 1.1 decision 3/A1); the rationale below was wrong.** Historical stage-1 test: away peers stop keeping the dead-lead hold armed **after native release**. A retained lease keeps the hold until drain completes, avoiding a lead replacement that could strand its identity. AI-only allies then leave native death/lead behavior available. `StoryAwayInteriorTest` covers the actual H1b new-entry admission gate; away members cannot initiate entries. Existing visits still service and exit. |
 | 1.4 Client intent and M | **CONFIRMED_TEST:** `StoryStepAwayRuntimeTest` executes the runtime intent/mailbox logic with a controlled clock: second M before the first ACK, separate swap/away pending IDs, STALE requeue, BUSY at 250 ms, area refusal without a loop, no HANDING_OVER while input remains ready, 5 s timeout including missing presence, disconnect reset, fresh exploration OPEN and unknown WAIT. `StoryQuickInputTest` covers raw M across input clear, repeat/focus behavior. **CONFIRMED_STATIC:** Q and F1 are closed while the phase is non-NONE; revision-gap discard preserves the return edge. |
 | 1.5 Own-body camera | **CONFIRMED_STATIC:** the existing input listener admits only look axes for a freshly proved own actor/controller while away, with focus and Esc/Q/menu gates; gameplay input stays closed. **CONFIRMED_TEST:** input clear retains away look timestamps/axes but discards movement; focus loss/stale axes remain closed. Actual orbit, camera continuity across a cutscene/load, and all character pairings are **UNKNOWN**. |
 | 1.6 Banner and names | **CONFIRMED_TEST:** ASCII phase text and centered top-bar layout at ordinary, wide, portrait, and 4K dimensions, invalid sizes/widths refused (`StoryAwayBannerTest`). **CONFIRMED_STATIC:** existing MenuNative frame owner draws it after letterboxing, using existing screen globals and atlas; new code acquires no render-target reference. Name tags append `(AI)` through their existing owner. Visual placement, cutscene persistence, and names on another player's screen are **UNKNOWN**. |
@@ -6829,7 +6825,7 @@ Saved-story profile on `codex/shared-simulation`, based on `de5facc7180b1853b9b1
 
 **Validation.** `bash tools/build-linux.sh` builds all targets. The final Wine run passed **212 test targets / 214 invocations**, including separately supplied image/script arguments and the idle/active/flush area-worker modes. Launcher targets, probes, and the paired `LanArenaLoopbackPeerTest` helper are excluded from this standalone run. Image fixtures use the supported executable identity in [executable.md](executable.md) (SHA256 `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`). No game was launched and no native gameplay was observed. Wine startup connection-reset failures were retried (including one startup in the final suite); all tests then completed successfully. The two fixtures changed afterward for a boundary assertion and unused-parameter cleanup were rebuilt and rerun.
 
-Mutation validation: **64 of 64 targeted guard mutations rejected** — 34 pure-policy/ownership/epoch and 30 runtime/transport/input/menu/interior/banner mutations. A surviving banner minimum-width mutation exposed a missing narrow-width boundary assertion; after adding it, the unmodified fixture passed and that mutation failed. The pause image fixture independently rejects every changed context/call byte. These tests establish refusal/transition contracts, not AI fighting, world continuity, or return latency in a real session.
+Mutation validation, corrected by stage 1.1 A8: the reported **“64 of 64 targeted guard mutations rejected”** overstated coverage. The reported matrix comprised 34 pure-policy/ownership/epoch and 30 runtime/transport/input/menu/interior/banner mutations, but removing the no-op request-ID assignment survived the stage-1 fixture. That guard was not established by the count; stage 1.1 adds the missing assertion and rejects that mutation. A surviving banner minimum-width mutation exposed a missing narrow-width boundary assertion; after adding it, the unmodified fixture passed and that mutation failed. The pause image fixture independently rejects every changed context/call byte. These tests establish refusal/transition contracts, not AI fighting, world continuity, or return latency in a real session.
 
 **Owner live gate — castle-road ambush, Tal host / a client character, matching profile-27 builds, StoryStepAway on:**
 
@@ -6838,7 +6834,7 @@ Mutation validation: **64 of 64 targeted guard mutations rejected** — 34 pure-
 3. In exploration, M opens the existing Main Menu. Close it with M and confirm no step-away. Exercise Q, shop, examine, and recent-menu-close precedence; when host state is stale/unknown, expect `Waiting for the host...` without a queued-away edge later.
 4. Use Esc Away and Return to Play both in and out of combat. Confirm that opening Esc does not pause either game. Away in a different lead area must show the distinct distance notice without repeated requests. The host's Main Menu must still skip the client's claimed character, including while AI drives it.
 5. Disconnect while away and reconnect: regain ordinary control. While away, watch a host cutscene, door transition, shop-house entry/exit, and whole-world load; confirm banner/camera continuity and return after each. An AI-away body near a remote shop trigger must not initiate entry.
-6. Press host M during combat: expect `Can't step away as host yet` and uninterrupted client simulation. With only away/AI allies, observe a downed host's native lead/death behavior after retained leases drain. Finally leave to title and rejoin, checking teardown and retry.
+6. Press host M during combat: expect `Can't step away as host yet` and uninterrupted client simulation. **Revised by stage 1.1 decision 3:** with away peers, the dead-lead hold stays armed after leases drain; confirm host control never rotates to an away body. Finally leave to title and rejoin, checking teardown and retry.
 
 All live outcomes above remain **UNKNOWN**. Stage 2 spectating, host step-away, party pause, client cluster following, and AI skill/Spirit use remain out of scope. No commit is authorized by this task.
 
@@ -6898,6 +6894,124 @@ retained native byte/ABI/cap contracts reach CONFIRMED_EXACT_IMAGE. Earlier
 hash-pinned testing entries are preserved with superseding pointers. No live
 behavior is claimed; ordered owner gates follow tier 0 acceptance.
 
+### 2026-10-20 — #54 step-away stage 1.1: candidate and verification
+
+Implemented [Parts A–E](step-away-stage1.1-task.md) on dirty `27f7296` in
+`codex/shared-simulation`, preserving the pre-existing enemy-AI review changes.
+No commit, deployment, or game run was performed. DLL SHA256: `dd917ee5601fc2a479c2eb22329355e009247933ceb4d381f4ce1500f0e5b80d`.
+The supported image identity, full test results, and file inventory are in
+[testing.md](testing.md#step-away-stage-11--2026-10-20).
+
+| Item | Evidence reached in this pass |
+| --- | --- |
+| A1 | **CONFIRMED_TEST:** connected away peers keep the death hold and remote actor before and after drain; the actual death/pending rotation predicates skip that actor. The uncovered lead-removal site `0x423433` is unchanged. The stage-1 “1.3 Death hold” rationale is superseded by decision 3. Enemy idling with a downed lead is the accepted historical observation in the brief; this candidate was not observed live. |
+| A2/A4 | **CONFIRMED_TEST:** pending away still acknowledges PREPARE, clears input and does not drive READY; host PREPARE and non-draining ownership during ObserverHolding remain BUSY. **CONFIRMED_STATIC in this original pass:** host-path involved swaps remain BUSY and request logs are bounded; the host swap and request-service fixtures were missing (the pure admission rule was tested). The optional PREPARE-admission relaxation was not selected. |
+| A3 | **CONFIRMED_TEST + CONFIRMED_EXACT_IMAGE fixture:** released-key receipts survive epoch rebind; both later Drain and LoadDrain succeed. Restoring the zeroing operation fails both assertions. |
+| A5 | **CONFIRMED_TEST:** host away state reads authoritative ownership without transport freshness; unknown client display state remains false, and H1b unknown admission refuses. |
+| A6/A7 | **CONFIRMED_TEST:** M uses the owned/admitted READY/menu gates and consumes ignored edges. Successful Esc Away/Return closes the menu; refusal keeps it open. |
+| A8 | **CONFIRMED_TEST:** an idempotent request consumes its ID without changing revision. Correction: the stage-1 “consuming their ID” claim had no assertion; its mutation survived the earlier 64-of-64 count. It is now caught. |
+| B1 | **CONFIRMED_TEST:** an authoritative away reservation retains the exterior through drain without also counting as held; lead, unavailable, disconnected, mismatched, and involved swapping seats are excluded. **CONFIRMED_STATIC in this original pass:** runtime outside-drain parking / INSIDE-away call sites were stubbed; their wiring was not tested. |
+| B2 | **CONFIRMED_TEST:** the actual split owner admits away-only retention; native doubles exercise lead-only added-reference accounting, unpark/repark, thread/identity/depth/counter refusal, foreign FullParty rejection, native balancing and retained-record uninstall refusal. The native split fixture lives in StorySplitPreflightTest; runtime mask publication stays in StorySplitControlTest. |
+| B3/B4 | **CONFIRMED_TEST:** lead-shop return waits for fade, ZoneState 3 and exact roster, disables snap before unpark, performs synthetic placement and shows the member. **CONFIRMED_STATIC in this original pass:** the runtime commits return only after placement and retains away intent on failed unpark; the host ownership transaction was not exercised. Story-house return unparks outside; an away INSIDE visit ignores exit contact and is evicted with the lead. The coordinator cancellation helper was tested; **CONFIRMED_STATIC in this original pass:** reversed AWAY reaches it through the runtime. **UNKNOWN:** client pixels, camera continuity, street view, actual loading screen and native placement until owner gates. |
+| B5 | **CONFIRMED_TEST:** manually armed vanilla TEMP/EXIT identity uncertainty expires at 20 seconds, including the EXIT/general-world-loading overlap. **CONFIRMED_STATIC in this original pass:** begin_zone starts that interval; no fixture called the vanilla arming path. READY clears it. First non-split TEMP membership is lead-only; only matching epoch/revision region observations widen it. A fresh name-based superseded proof permits rebase; casts retain active tails, retire when drained, and rebind through READY. Host camera/filter fallback requires neutral exact globals and no active operation/scope; owned cameras stay blocked. Client epoch reseeding checks READY, area, masks and unchanged frame generations. **CONFIRMED_STATIC:** the runtime also retires the binding when no remote peer is READY or retained. |
+| B6 | **RETIRED:** the October 14 farmhouse native take-along claim, its §10 row and dependent H1rest passages. Its own log shows Tal outside and paused until exit; vanilla TEMP is lead-only. |
+| D | **CONFIRMED_TEST + CONFIRMED_EXACT_IMAGE:** sky reinstall resets follow serials/blend; client-local colour/blend/brightness re-arm as a family, fog kinds individually, and dome locally; replay and host writes do not re-arm; new logs are bounded/client-only. Light-ring writes do not re-arm cumulative events. |
+| E | **CONFIRMED_STATIC** audit and default-off `[StoryAreas] TPtrAudit`; **CONFIRMED_TEST** bounded read-only walker; **CONFIRMED_EXACT_IMAGE** hashes at all five requested native sites. See [the audit](step-away-stage1.1-audit.md). The corrupting writer remains **UNKNOWN**; no register bridge or identity weakening. |
+
+Validation: all targets built; 16 focused tests passed; full Wine
+suite 221/225 invocations passed with only the four known
+non-pass cases; 76/76 isolated mutations rejected.
+These results establish fixture behavior and specified image contracts, not
+live gameplay or a repaired castle crash.
+
+**Remaining UNKNOWN / owner gates:** after a Leave failure the globals can
+remain swapped, so host fallback stays blocked; `light_fault` still freezes
+world-light updates; epoch-keeping faults while a member is away are not
+covered by CastSuperseded. A parked exterior body's vulnerability is undecided
+and must be observed in the story-house gate. On rejoin the dome may swap
+Storm/Light during zone entry before settling; the host's retained sky now
+supersedes client-local sky writes in the host area. Light-ring rejoin behavior,
+host `latest[]`/`light_ring`/`dome_name` retention across re-host, and spawn-group
+`replayed[]` keyed to the unchanged host epoch remain UNKNOWN. The reported
+6–8 second rejoin was not slower than the 15.5 second first join after the fade;
+title/lobby travel added the perceived delay (owner brief, no new measurement).
+
+Run the brief's owner gates in order: Kamo stay-away, Kamo Return, mid-split
+away outside/inside, vanilla cast-bound door, story house including vulnerability,
+downed lead, PREPARE request, storm/post-battle rejoin, then controlled castle
+tunnel round trips with the TPtrAudit switch telemetry. Stage 2 and host step-away remain out
+of scope.
+
+### 2026-10-20 — castle capacity Part A candidate
+
+2026-10-20: Superseded for DLL `67c8271d6ef3a69f7b1883fdceb195e9a8b0338af24c0bc321d556235e2241ca` by [Castle Q2 pose omission and bounded hold](testing.md#castle-q2-pose-omission-and-bounded-hold--2026-10-20); earlier DLLs keep this gate.
+
+Dirty `27f7296`, separate DLL `264d42a82a27552a4307108fa74f0769c984ac97f2b325705dc25894a4e199c9` at
+`build/artifacts/castle-part-a-264d42a8/SudekiMP.dll`, with `part-a.sha256`,
+`a-diff.txt`, `a-final.diff` and `part-a-source/` alongside it. The preceding
+final A+B+C DLL is retained at `build/artifacts/castle-final-66e851b6/SudekiMP.dll`;
+`build/mingw32/bin/SudekiMP.dll` is the latest final A+B+C build. See the
+[hash-pinned tests and memory measurements](testing.md#castle-capacity--stage-11-review--part-a-2026-10-20).
+**CONFIRMED_TEST:** synthetic actual adapter selection/apply/recruitment,
+actual 16-chunk receive, catch-up and protocol refusal; 17 discriminating
+mutants rejected. Flatpak build and focused tests pass; full suite 222/226,
+unchanged four known non-pass cases. **UNKNOWN:** live tunnel behavior/cost.
+
+Owner decisions recorded: raise capacity to 128 **and** omit overflow;
+priority and stable 5 m replacement, client host-set intersection; Q1 releases
+omitted NPCs to local idle after client_seen (accepted rebind snap); Q2 omits
+non-party `target()` failures inside catalog and refills (door state absent
+until rebound), while party failure refuses. Post-catalog non-party pose reads
+(host transform/channel_pose/submodel_pose without ranged fallback, wire bounds,
+and client matched-target read_pose outside the combatant omission branch),
+generic 0x2d5b00 identity/position failures and unreadable registry entries
+still refuse the frame. Entries past castle index 290 are untested live;
+reachability is **UNKNOWN**. Q2's gate is no non-party `target()`-stage refusal;
+extending it requires the outstanding owner decision. World v12→13 /
+profile 27→28, 64 → 128 actors, 8 → 16 chunks makes mixed peers refuse
+at handshake. Catch-up buffer 20480 / 20 fragments, once per join. Owner gate
+and 96-actor fallback threshold are in testing.md; no live claim or crash fix.
+
+### 2026-10-20 — castle/stage-1.1 review Parts B/C candidate
+
+Dirty `27f7296`; final DLL `66e851b67bd69188a666b844732033ce780cf28dc3b60b8f15b59a7ab3d91514`. The separate Part A
+candidate/hash and owner-approved capacity/Q1/Q2/protocol decisions above are
+preserved. [Final tests and file inventory](testing.md#castle-capacity--stage-11-review--final-parts-bc-2026-10-20).
+No commit, deployment or game run by this pass.
+
+**CONFIRMED_TEST:** the actual coordinator no longer reparks after member_enter
+when its caller holds a stale scene snapshot; ordinary non-interior return is
+admitted during holding, while interior holding is BUSY; inside return shows
+and clears away state only after unpark. Actual runtime ownership fixtures now
+cover return result mapping/conditional commit, reversed AWAY cancellation,
+parked disconnect/reconnect, 64 request lines, both AwayDrained call sites,
+activity retention and post-service `(held & ~away, away)` publication. These
+close the fixture gaps explicitly narrowed in the preceding stage-1.1 entry.
+
+**CONFIRMED_TEST:** actual vanilla begin_zone TEMP/EXIT arming and 20 s deadline,
+cast transient branch and both runtime identity witnesses; faulted foreign
+filter refusal; READY/HUMAN RESERVED/HANDOFF admission; actual ended clears
+parking; TPtr own/heap/foreign-stack counts; Esc-only invalid-presentation M
+notice with input readiness FALSE. Actual TPtr logging fixture proves every
+node copied before the first log. Default-off switch telemetry uses checked
+native fields and a tested bounded cadence; its service call and client last
+presented snapshot are **CONFIRMED_STATIC**, not a live observation.
+
+All targets build; 20 distinct focused fixtures pass; full suite 225/229 with
+the unchanged four known non-pass cases; three native C11 tests pass. 42 Part B
+mutations, including both pre-fix implementations, are rejected (59 total with
+Part A; three separate compile-time guards). **UNKNOWN:** live return/control
+continuity, tunnel performance and the corrupting writer. Kamo gate must read
+`press_to_control_ms` against the 1.6 s door fade plus offer and the client's
+5 s RETURNING fallback; exceeding it is unobserved.
+
+Part C is research-only: [the audit](step-away-stage1.1-audit.md) distinguishes
+observed correct-entity/ESI=0 and balanced mod lookups, static saved-register
+and unlink mechanism, conditional dead-head inference, and **HYPOTHESIS** H1
+(non-main-thread unlocked mutation) / H2 (leaked main-thread node). The owner's
+1 ms list walk and conditioned hardware watchpoint remain the next live probe;
+no crash fix or worker-native access was added.
+
 ## 10. Remaining work (owner review 2026-10-15; states refreshed 2026-10-18; research digests in `coop-story-research-54.md`)
 
 Against the original phases, with the #54 route (castle road ↔ New
@@ -6916,7 +7030,7 @@ Brightwater, Ailish host / Tal client) as the yardstick:
 | G lead vs ownership | Not started. The death/lead hold still keeps a downed or scripted-pending lead in slot 0; every module assumes host = native lead = controller target (CONFIRMED_STATIC); the native lead-change path 0x4237B0 is mapped (CONFIRMED_STATIC); enemies idle while the host is down (CONFIRMED_LIVE) | Close the static gates (slot-0 vs controller reader census, camera re-install after cinematics, client-side rotations); then the host_character model split with pure tests, one 0x4237B0 lead-only adapter with an image test, then retire the hold. Owner decisions: lead return, D11/D12 scope, pad switching. Research: [G](coop-story-research-54.md) |
 | **Co-op enemy AI (#97)** | Dirty `fa50351` candidate implements watch, tier 0 cap/Lead-PC fallback and companion Defend, plus human-only threat, capped per-shooter alerts and idle pushes. Separate shadow state and bounded lifecycle diagnostics; away proof no longer depends directly on host Esc. Policy and supported-image fixtures pass; live behavior remains UNKNOWN | Owner reruns last-away Esc open/closed, completes tier 0 gate, then enables tiers 1/1.5/2 in order and compares would_* at tier 0. Mode 0xE stays native; no AwareForceIn weight edits, tier 3 or bark. See [current evidence](testing.md#enemy-targeting-away-menu-diagnostic-and-tiers-1152--2026-10-19) and `enemy-ai-tier12-task.md` |
 | **H interactions (D4, D11, D12)** | Chests (H1a): Tal opens a chest under a scoped front; one clean open accepted live; remote control during the host's own open/smash CONFIRMED_TEST. Shop doors (H1b, Kamo only): Tal enters and leaves alone, both see each other inside, the lead entering with Tal inside reloads the house without the hang (live). Tal's own Kamo shop and talk, speech camera, Kamo turning and the farewell hold (live); line gestures behind a default-off switch (live UNKNOWN). Rejoin at Tal's spot, steering through the lead's door script, host Kamo talk kept off clients: CONFIRMED_TEST | Live checks of the CONFIRMED_TEST H1b items and the gesture check; #85 host-side fade and #86 lead exit keeping members inside (rows below); #82, #67 follow-up, #83; the farmhouse sword chest and more shops, and the D12 stages S0–S4: rows below |
-| H remaining: farmhouse sword chest against D11, more shops in the door table | Door and shopkeeper tables hold only LNBr_Kamo_shop; the castle Kamo is out only by absence and only the keeper table has a pure test (CONFIRMED_STATIC). The remote chest open is accepted once outdoors (CONFIRMED_LIVE); the farmhouse sword chest sits in a lead-only story house (D11) whose one native take-along froze the client, never retested | Owner picks the first chest gate (remote farmhouse entry with the lead inside, native take-along, or accept the outdoor open), which inns join, and the castle Kamo rule; meanwhile a pure barred-house list and door-table test, then G1 on a save with the chest still closed. Research: [H1rest](coop-story-research-54.md) |
+| H remaining: farmhouse sword chest against D11, more shops in the door table | Door and shopkeeper tables hold only LNBr_Kamo_shop; the castle Kamo is out only by absence and only the keeper table has a pure test (CONFIRMED_STATIC). The remote chest open is accepted once outdoors (CONFIRMED_LIVE); the farmhouse sword chest sits in a lead-only story house (D11) whose alleged native take-along is RETIRED: its October 14 log shows Tal outside/paused until exit; vanilla TEMP is lead-only | Owner picks the first chest gate (remote farmhouse entry with the lead inside or accept the outdoor open; native take-along is RETIRED), which inns join, and the castle Kamo rule; meanwhile a pure barred-house list and door-table test, then G1 on a save with the chest still closed. Research: [H1rest](coop-story-research-54.md) |
 | D12 S0: host conversations private beyond shopkeepers | Only Kamo's talk is kept off clients: the host checks each line's speaker against the shopkeeper table (CONFIRMED_TEST); host classification and the client's idle receipt are CONFIRMED_LIVE in logs, the owner check is open. Every other host conversation reaches clients with text and voice (CONFIRMED_STATIC) | Owner decisions: how story scenes are detected (bars only, or bars plus a story-NPC table) and the default when classification fails. Then a pure per-conversation classifier with listener and span-marker reads, a research build logging participant names (G1/G3), and an owner check with Tal's own talk closed. Research: [S0priv](coop-story-research-54.md) |
 | D12 S1: story-progress mirror and quest notifications | Not started. No story-progress message or quest-log code exists (CONFIRMED_STATIC). Host and client story blocks diverge live, 1500 against 1400 (CONFIRMED_LIVE). Kamo's T2 greeting reads the client's own block (CONFIRMED_STATIC). SetStoryBlock, the quest log, the quest page and the QL_* wrappers are mapped (CONFIRMED_STATIC). Quest boxes are never relayed (INFERENCE that the client sees none) | Close G1–G3 with observe-only host logs (what the zone story lists hold, what a block write on a client does, whether the classifier works). Then S1a: the profile-27 progress message, a deferred client quest-log apply, the Kamo block mirror and queued notifications. Then owner decisions O1–O8 and a live owner gate on the route. Research: [S1](coop-story-research-54.md) |
 | D12 S2: real conversation scripts on the client, shared writes blocked | Not started. Kamo's talk on Tal's game is a hand-coded CSpeech/UIDialog replay (CONFIRMED_LIVE). No script runs on a client, whose trigger dispatch stays held (CONFIRMED_STATIC). Kamo's OnAction closure, the submit, step and retire ABI, and the native kill paths are mapped (CONFIRMED_STATIC) | Static gates (exit-answer cursor kinds, method receivers, AI control on the replica, kill paths, entity replacement), then owner decisions O1, O3 and O8 on the task-trace contract changes. Then RB-A (client log-and-run) and RB-B (host log-only), a default-off Kamo-only runner with the replay as fallback, and the owner's 20-conversation live gate. Research: [S2](coop-story-research-54.md) |
@@ -6947,3 +7061,249 @@ Brightwater, Ailish host / Tal client) as the yardstick:
 Owner rule restated for D6: **items picked up** (ground drops, enemy drops,
 chests) are cloned to every player's inventory; **items a player buys** stay
 with that player. Nothing else is shared.
+
+### 2026-10-20 — castle/stage-1.1 review follow-ups candidate
+
+Dirty `27f7296`; new DLL
+`d523d43c7df3fb1c1a4a906f6d5cdde98b2c9fcfddae189a8d5c4014383522db`,
+retained at `build/artifacts/castle-review-d523d43c/SudekiMP.dll`.
+[Review tests, mutations and file inventory](testing.md#castlestage-11-review-follow-ups--2026-10-20).
+Items 1–19 applied; Part A's artifact copy was already complete, so only its
+provenance wording changed. The preceding `66e851b6…` owner live-gate DLL
+remains in `build/artifacts/castle-final-66e851b6/`.
+
+**CONFIRMED_TEST:** ambient ownership switches on the next observation in the
+same frame/clock after a real rebind, instead of up to 250 ms late. This changes
+behavior the owner is exercising; one refused interpolation pair per set
+change and NPC rebind snap remain. Direct shop checks, raw identity diagnostics,
+client-divergent recruitment, priority/epoch/ambiguity selection, full catch-up
+field equality, deterministic count=129 refusal, 72-combatant HP drops and
+inside-return show increments now have discriminating tests. More than 64
+combatants live remains **UNKNOWN** and is separate from the castle gate.
+**CONFIRMED_STATIC:** assembly mask/chunk capacity assertions.
+
+Flatpak build, diff check, 21 focused fixtures and three native C11 tests pass;
+full suite 225/229 with the unchanged four known non-pass cases. Twenty isolated
+runtime mutation cases fail at assertions/CHECKs; two capacity mutations fail
+at their compile assertions. Graphify updated. Q2 remains target()-stage only;
+the outstanding pose-read extension is documented, not implemented. Audit
+provenance, first-lookup latch and conditional target-refresh traffic corrected.
+No commit, deployment, game run or live acceptance claim.
+
+### 2026-10-20 — castle/stage-1.1 review second pass
+
+Dirty `27f7296`; items 20–22 applied. Header-only item 21 rebuilt the DLL:
+`2054726676010da07bf9db3aec66c09c9bfa9a7b96ca56abf3db013b08527920`, retained in
+`build/artifacts/castle-review2-20547266/SudekiMP.dll`. Its `.text` bytes match
+the preceding `d523d43c…` candidate; runtime logic is unchanged.
+[Second-pass evidence](testing.md#castlestage-11-review-second-pass--2026-10-20).
+H1 separates conditional target refresh from other native-control calls;
+the header documents the actual ownership-serial bump sites. The strengthened
+priority-boundary assertion rejects the post-selection ambiguity mutant before
+the old i=1 duplicate assertion. Historical mutation attribution is corrected.
+Build and diff check pass; 21 focused fixtures, the separate priority-boundary
+baseline and three native C11 tests pass. Full suite is 225/229 with the same
+four known non-pass cases; both isolated mutation invocations fail at their
+intended assertions. Graphify updated. Evidence is CONFIRMED_TEST / CONFIRMED_STATIC.
+No commit, deployment, game run or live acceptance claim; prior artifacts and
+owner decisions remain intact.
+
+### 2026-10-20 — castle Q2 pose omission and bounded hold candidate
+
+Dirty `27f7296`; DLL
+`67c8271d6ef3a69f7b1883fdceb195e9a8b0338af24c0bc321d556235e2241ca`, retained
+at `build/artifacts/castle-q2-67c8271d/SudekiMP.dll`, with hash, scoped diff,
+changed-source snapshot and validation results. The `20547266…` artifact remains
+separate and unchanged. [Hash-pinned tests and owner gate](testing.md#castle-q2-pose-omission-and-bounded-hold--2026-10-20).
+
+Owner decision in [the brief](castle-q2-pose-omit-task.md): extend Q2 from
+catalog target() failures to non-party registry-entry, generic identity/position,
+pose, death-state, wire-bounds and final-recheck failures. The reviewer's H
+choice, authorized by this brief, retains the whole previous record for an
+identity-matched bound non-party entity through 2000 ms from its last fresh
+committed read. Held captures never extend that window. Identity failures
+never hold; fresh recovery preserves generation/HP-drop continuity, while
+expiry followed by return receives a new generation. This records the brief's
+decision, not a new owner play-session acceptance.
+
+**CONFIRMED_TEST:** actual capture/Prepare/Apply, codec/interpolation and runtime
+refusal fixtures; 24 focused executables plus explicit priority-boundary and
+party-identity cases; three native C11 tests; 35 isolated mutants fail at
+assertions. The initially surviving party-omission log mutant exposed a missing
+assertion, now added and verified. All-target Flatpak build and diff check pass;
+full suite 225/229 with the same four known non-pass cases. The LauncherTabs UI
+case passes in an isolated desktop after a shared-desktop timeout. Graphify
+updated with its existing parser limitations.
+
+**CONFIRMED_STATIC:** one added host pose pre-pass read per non-party target;
+held entries are read twice. Client selector/empty-state caches are re-probed
+after any native residency acquisition, with no further acquisition in that
+pass and no continuing-path native game call before the main-loop pose read.
+Backing readiness remains an observation across the existing Prepare/Apply
+gap. Per-side/epoch omission logs deduplicate held and removed classes
+separately, within 64 slots and one exhaustion line. Q1 still releases only
+NPCs; omitted client non-NPCs retain their last applied pose under zero ambient
+delta. ApplyPrepared's transaction refusals are unchanged; only diagnostics
+and raw context improve.
+
+**UNKNOWN / owner gate:** live castle behavior and capture/apply cost. Run Tal
+away, then controlled, with Ailish's tunnel round trips; apply the new extended
+Q2 gate and all seven remaining refusals in testing.md. In particular, repeated
+identity omissions can refuse every interpolation pair; bounded held poses can
+stand still; omitted non-NPC client poses remain unobserved. Resource-fault
+latching, exact recruitment equality, global/sequence overflow, native write
+checks and other-thread changes retain their constraints. The 16 ms / 96-actor
+fallback and separate crash investigation remain. No commit, deployment,
+game run or live acceptance claim.
+
+
+### 2026-10-20 — castle arrival / bounded client lead candidate
+
+Dirty `27f7296`, DLL `aa5deba44f442537153197bc32ff51225f62daec478ec42289eae53c22950f5f`, preserved separately at
+`build/artifacts/castle-arrival-aa5deba4/SudekiMP.dll` with hash, diff,
+source snapshot and validation. Earlier `20547266…` and `67c8271d…` artifacts
+remain unchanged. [Research R0–R5](castle-arrival-cutscene-research.md) and
+[hash-pinned tests / Part S](testing.md#castle-arrival-cutscene-and-client-lead--2026-10-20).
+
+**Accepted owner decisions.** When the story sends Tal to his room, his
+connected owner returns from away and controls him; host input must not drive
+him and the host camera follows Tal. If the owner disconnects, the host may
+control him temporarily or assign another connected player. This pass uses
+temporary host control after native drain, preserves reservations and yields
+to a fresh acknowledged lease on rejoin. It adds no assignment UI or
+AI-controlled native lead. `[StoryAreas] ClientLeadSpectate` defaults off;
+ordinary observer/presentation gate corrections are ungated.
+
+**CONFIRMED_LIVE — older-build observation only.** The owner crossed the
+tunnel into the castle on `20547266…` with Tal away, then saw the arrival
+freeze and host-driven Tal under the Guest AI label. The inspected logged
+crossing/castle host samples all captured party/world; no world_omitted was
+present. Weighted castle means: client apply 17368 us, world 7568 us, host
+capture 3833 us. All nine client apply windows exceeded 16 ms: the earlier
+cost gate failed and its 96-actor fallback remains applicable. This is not
+candidate performance evidence. The zeros in the inspected host samples also
+had failed/not-attempted party capture, predominantly non-READY scenes.
+
+**CONFIRMED_STATIC / CONFIRMED_TEST.** Preserve a positively proved TEMP on
+scripted party replacement; transient scene differences wait. Keep the client
+party paused and project only Tal for presentation, with generation and exact
+native/world proofs. Use the existing control transaction and native AI/filter
+seams for remote lead and symmetric drain. Exact-image research exposed pending
+FilterNone's late settlement; the guard now reproduces only its own verified
+None commit and camera-input notification before native input consumption.
+Host camera admission requests native Exploration only for a proved Tal target.
+
+All-target build/diff check, 26 focused executables plus control/host-filter
+fixtures and explicit world cases, three native C11 tests, 35 isolated Q2 and
+37 arrival assertion mutants pass. Full suite 228/232, same four known non-pass
+cases; Graphify updated. Supported-image byte/ABI checks remain distinct from
+synthetic native spies. Part S maps both briefs and identifies undiscriminated
+or unexecuted claims. No independent external review was performed.
+
+**UNKNOWN / owner live gate.** This DLL has not been played. The synchronous
+movie provides no fresh stream; post-movie recovery, actual Exploration follow,
+room scripts reasserting a camera, reverse route/re-add, skip-epoch packet loss
+and whole-game rejoin remain unproven. Run the five arrival gates in testing.md:
+tunnel/castle away then controlled; quest/movie presentation recovery; Tal room
+owner/input/camera/label; reverse Ailish lead if reachable; disconnect/rejoin.
+Keep the Q2 extended omission/hold gate, remaining refusals and separate cost /
+crash investigation. No commit, deployment or live acceptance claim.
+
+
+### 2026-10-20 — first arrival replay: profile wiring fault and shared room camera
+
+**CONFIRMED_LIVE — aa5deba4 owner report / bounded log record.** Client
+presentation recovers after the host skips FMA04A and enters Tal's room;
+exclusive client control and room camera fail. Five return requests are refused
+as UNAVAILABLE while Tal remains away; the UI incorrectly calls it a step-away
+failure. The old build loaded the switch only in story-observe, so both
+saved-story INIs being true did not activate the handoff. The earlier static
+saved-story-wiring claim is withdrawn, not upgraded by the successful scene load.
+
+**Accepted owner correction.** Both windows use the authored room camera;
+only Tal's connected reserved client controls Tal. Host input remains fenced.
+Disconnect-only temporary host control remains as previously accepted. The
+owner proposes host-only kick/body-release controls and spectator claims later,
+including temporary/permanent spectator removal; no new lobby assignment or
+reservation policy is implemented here.
+
+**CONFIRMED_TEST / CONFIRMED_STATIC — correction candidate `4c7ed0f6…`.** The
+saved-story branch reads the default-off switch before lobby installation and
+logs its effective value. Refused returns get return wording. The host no
+longer requests Exploration in the room; the client borrows the fresh matched
+host room view independently of gameplay input. Failed view release retains
+ownership for retry. New regressions fail against the old code; details, hash
+and validation are in [testing.md](testing.md#castle-arrival-first-live-replay--loader-and-room-camera-correction-2026-10-20).
+No commit, deployment or live acceptance of the correction.
+
+**UNKNOWN / larger boundary.** Synchronous FMA04A still stops host world
+publication. Host-synchronized local movie playback and host-only skip need
+separate movie-loop/native-owner and transport work; [R7](castle-arrival-cutscene-research.md#r7--remaining-movie-presentation-boundary-owner-approved)
+records the concrete proposal and owner boundary. Current corrected ownership,
+room framing, reverse and whole-game reconnect remain owner live gates.
+
+
+### 2026-10-20 — approved synchronized castle movie candidate
+
+**Accepted owner decision.** Play each client's installed FMA04A, with only
+the host deciding skip/end. This approves R7's native movie/transport extension.
+The previously corrected authored Tal-room camera and exclusive reserved-client
+control remain the handoff policy; the `ClientLeadSpectate` opt-in still applies.
+Host-only body kicking/assignment remains later work.
+
+**CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST.** Candidate
+`498b9b00…`, dirty `27f7296`, shares the existing MoviePlay entry, queues
+connection/scene-fenced host events, plays on the bound game thread, and uses
+the verified native close on host end, disconnect or shutdown. Client skip is
+disabled. Late starts and replay are refused; failed hook restoration retains
+its dependencies. Workers handle only data. The optional capability leaves
+ordinary keepalives running for peers that ignore it.
+
+All-target build, 34 focused invocations, 233/237 full-suite invocations (same
+four known non-pass cases), three native C11 checks and 26 assertion-rejected
+mutants pass. Graphify and diff checks complete. The full hash, file-by-file
+report and evidence limits are in [testing.md](testing.md#castle-arrival-synchronized-movie--approved-extension-2026-10-20).
+The `4c7ed0f6` handoff/camera-only artifact stays separate.
+
+**UNKNOWN / live gate.** No stage reload or game play on this DLL. Native movie
+pixels/audio, start skew, host skip/EOF, device recovery, fresh presentation,
+authored room view, exclusive client input, reverse and whole-game rejoin still
+need the owner replay. No commit, deployment or live acceptance claim.
+
+
+### 2026-10-20 — castle movie replay and preparation scope correction
+
+**Owner observation on `498b9b00…`.** Client movie did not appear to load;
+host skip returned to Tal's room and only the client could move Tal. Logs
+and read-only terminal state show event receipt without a playback attempt.
+This is partial control-handoff evidence, not synchronized-movie acceptance.
+
+**CONFIRMED_STATIC / CONFIRMED_TEST.** The controller callback used a
+menu-frame-only pause proof. Candidate `7d359682…` restores retained views
+under the existing fresh controller containment bracket, exits that scope,
+then enters native playback. Named refusal logs remain bounded. No authority,
+menu pause, worker or render-frame ownership rule is relaxed. See
+[R9](castle-arrival-cutscene-research.md#r9--first-synchronized-movie-replay-preparation-used-the-wrong-pause-proof)
+and the [hash-pinned validation](testing.md#castle-movie-preparation-scope-correction--2026-10-20).
+
+**UNKNOWN / live gate.** Correction not deployed or played. Client movie
+pixels/audio, start skew, host skip/EOF, camera framing, reverse and full
+reconnect remain owner replay gates. No commit or live correction claim.
+
+
+### 2026-10-20 — castle ↔ Brightwater loop accepted; checkpoint for stabilization
+
+**CONFIRMED_LIVE — owner report on `7d359682…`, dirty `27f7296`.** Following
+the matching host/client reload, the owner reports that the correction works
+and that the castle ↔ Brightwater loop was completed. Saved-story LAN,
+host Ailish / reserved-client Tal, ClientLeadSpectate enabled, two Linux/Wine
+windows on one machine. This supersedes the preceding candidate's unplayed
+route gate. [Testing record](testing.md#castlebrightwater-loop-accepted-checkpoint--2026-10-20)
+contains the full DLL hash, profile, evidence ID and limits; individual camera,
+movie timing/EOF, reconnect and performance checks are not inferred from the
+route acceptance.
+
+**Owner direction.** Commit, push and build this checkpoint, then address bugs
+and slowdowns before release. The all-target build passes again with unchanged
+DLL hash; prior 35/35 focused and 233/237 full-suite results remain applicable
+to unchanged code. This is a stabilization checkpoint, not release approval.

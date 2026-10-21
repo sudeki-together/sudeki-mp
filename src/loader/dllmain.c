@@ -1252,9 +1252,12 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             /* Research diagnostics (bounded, log-only) default on; off when
              * [StoryAreas] ResearchDiagnostics=false. */
             (SudekiMpLogSetResearch(!config_key_false(config_path,L"StoryAreas",L"ResearchDiagnostics")),FALSE) ||
+            (SudekiMpCleanroomEngineSetTPtrAudit(read_config_boolean(config_path,L"StoryAreas",L"TPtrAudit")),FALSE) ||
             /* Developer test start: place the party at fixed coordinates once
              * the saved game is loaded ([StoryAreas] TestStartLeader/Follower). */
             (saved_story && (SudekiMpLanStoryRuntimeSetStepAway(!config_key_false(config_path,L"SudekiMP",L"StoryStepAway")),FALSE)) ||
+            (saved_story && (SudekiMpLanStoryRuntimeSetClientLeadSpectate(
+                read_config_boolean(config_path,L"StoryAreas",L"ClientLeadSpectate")),FALSE)) ||
             ((saved_story ? configure_test_start(game_module,config_path) : (void)0),FALSE) ||
             /* Explicit test-only protection; ordinary saved-story sessions
              * remain unchanged. Acquisition and cleanup belong to the host. */
@@ -1363,6 +1366,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 !SudekiMpInstallLanArenaWindowPolicy(game_module) ||
                 !configure_background_audio(game_module,config_path) ||
                 (SudekiMpLanStoryRuntimeSetStepAway(!config_key_false(config_path,L"SudekiMP",L"StoryStepAway")),FALSE) ||
+                (SudekiMpLanStoryRuntimeSetClientLeadSpectate(
+                    read_config_boolean(config_path,L"StoryAreas",L"ClientLeadSpectate")),FALSE) ||
                 (SudekiMpLanStoryRuntimeSetClientNativeCamera(
                     !read_config_boolean(config_path,L"StoryAreas",L"ClientMathCamera")),FALSE) ||
                 !SudekiMpInstallLanStoryRuntime(game_module,&party)) {

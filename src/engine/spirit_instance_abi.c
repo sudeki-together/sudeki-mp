@@ -1412,6 +1412,11 @@ static unsigned char __attribute__((thiscall)) route_skill_target_predicate(void
     if(update_fault || GetCurrentThreadId()!=owner_thread) { INSTANCE_FAULT(); return 1; }
     return native_skill_target_predicate(controller);
 }
+static BOOL host_pass_through(void) {
+    return instance_image && owner_thread==GetCurrentThreadId() && !scope_depth && !operation_depth && !update_depth &&
+        object_exact(primary_manager,MANAGER_SIZE,MANAGER_VTABLE) && object_exact(primary_camera,CAMERA_SIZE,CAMERA_VTABLE) &&
+        globals_exact(primary_manager,primary_camera);
+}
 static void route_skill_filter(void *controller,unsigned int filter) {
     Entry *e=scoped_participant_owner();
     /* The script's FilterNone/All pair addresses the singleton controller,
@@ -1425,7 +1430,8 @@ static void route_skill_filter(void *controller,unsigned int filter) {
             !skill_input_exact(e,controller)) INSTANCE_FAULT();
         return;
     }
-    if(update_fault || GetCurrentThreadId()!=owner_thread) { INSTANCE_FAULT(); return; }
+    if(GetCurrentThreadId()!=owner_thread || (update_fault &&
+        (!host_pass_through() || !address(instance_image+0x408da4u,controller)))) { INSTANCE_FAULT(); return; }
     native_skill_filters[filter](controller);
     /* Passive provenance only, after the real controller callback. Suppressed
      * remote casts above never create a native filter ownership observation. */
@@ -1465,7 +1471,7 @@ unsigned SudekiMpSpiritInstanceFilterEntryDiag(HMODULE image,unsigned which) {
 }
 BOOL SudekiMpSpiritInstanceFilterAllEntryExact(HMODULE image) {
     SudekiMpInlineHook *hook=&skill_filter_hooks[1];
-    return image && instance_image==(uint8_t *)image && !update_fault &&
+    return image && instance_image==(uint8_t *)image && (!update_fault || host_pass_through()) &&
         GetCurrentThreadId()==owner_thread && !scope_depth && !operation_depth && !update_depth &&
         hook->installed && hook->target==instance_image+skill_filter_sites[1] &&
         hook->length==13u && native_skill_filters[1]==(ControllerFilterFunction)hook->trampoline &&
@@ -1475,7 +1481,7 @@ BOOL SudekiMpSpiritInstanceFilterAllEntryExact(HMODULE image) {
 }
 BOOL SudekiMpSpiritInstanceFilterNoneEntryExact(HMODULE image) {
     SudekiMpInlineHook *hook=&skill_filter_hooks[0];
-    return image && instance_image==(uint8_t *)image && !update_fault &&
+    return image && instance_image==(uint8_t *)image && (!update_fault || host_pass_through()) &&
         GetCurrentThreadId()==owner_thread && !scope_depth && !operation_depth && !update_depth &&
         hook->installed && hook->target==instance_image+skill_filter_sites[0] &&
         hook->length==13u && native_skill_filters[0]==(ControllerFilterFunction)hook->trampoline &&
@@ -2256,6 +2262,9 @@ static void __attribute__((thiscall)) named_camera_update(void *node,void *args)
     for(unsigned int i=0;i<MAX_INSTANCES;++i) for(unsigned int k=0;k<2;++k)
         if(entries[i].named_cameras[k] &&
             (uint8_t *)entries[i].named_cameras[k]+8==node) owner=&entries[i];
+    if(update_fault && !owner && host_pass_through() && object_exact(node,4,0x2cce6c)) {
+        SetLastError(error); named_update_original(node,args); return;
+    }
     if(update_fault || owner_thread!=GetCurrentThreadId() || !object_exact(node,4,0x2cce6c) ||
         (owner && (!owner->named_ready || owner->destroying))) {
         INSTANCE_FAULT(); return;

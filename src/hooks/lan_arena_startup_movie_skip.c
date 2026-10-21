@@ -20,7 +20,7 @@ static const char *const startup_movies[] = {
     "TWIMTBP.bik"
 };
 
-typedef BOOL (__attribute__((cdecl)) *MoviePlayFunction)(
+typedef BOOL (__attribute__((cdecl,regparm(0))) *MoviePlayFunction)(
     const char *movie_name,
     BOOL skippable
 );
@@ -29,6 +29,11 @@ static HMODULE installed_game_module;
 static BOOL restore_quarantined;
 static BOOL restore_failure_logged;
 static BOOL containment_module_pinned;
+static BOOL skip_logos=TRUE,observer_owns_hook;
+static SudekiMpMovieBegin movie_begin;
+static SudekiMpMovieEnd movie_end;
+static volatile LONG native_movie_calls;
+
 
 static BOOL readable_region(const void *pointer, size_t length) {
     MEMORY_BASIC_INFORMATION information;
@@ -100,12 +105,12 @@ BOOL SudekiMpLanArenaStartupMovieShouldSkip(const char *movie_name) {
     return matched_startup_movie(movie_name) != NULL;
 }
 
-static BOOL __attribute__((cdecl)) lan_arena_movie_play(
+static BOOL __attribute__((cdecl,regparm(0))) lan_arena_movie_play(
     const char *movie_name,
     BOOL skippable
 ) {
     MoviePlayFunction original_movie_play;
-    const char *matched_movie = matched_startup_movie(movie_name);
+    const char *matched_movie = skip_logos?matched_startup_movie(movie_name):NULL;
     if (matched_movie == NULL) matched_movie = matched_intro_poem(movie_name);
 
     if (matched_movie != NULL) {
@@ -127,7 +132,12 @@ static BOOL __attribute__((cdecl)) lan_arena_movie_play(
     original_movie_play =
         (MoviePlayFunction)movie_play_hook.trampoline;
     if (original_movie_play == NULL) return FALSE;
-    return original_movie_play(movie_name, skippable);
+    InterlockedIncrement(&native_movie_calls);
+    BOOL observed=movie_begin && movie_begin(movie_name);
+    BOOL result=original_movie_play(movie_name, skippable);
+    if(observed && movie_end) movie_end();
+    InterlockedDecrement(&native_movie_calls);
+    return result;
 }
 
 BOOL SudekiMpLanArenaStartupMovieSkipImageMatches(HMODULE game_module) {
@@ -224,6 +234,9 @@ static void retain_after_restore_failure(DWORD error) {
 BOOL SudekiMpUninstallLanArenaStartupMovieSkip(void) {
     DWORD error;
 
+    if(InterlockedCompareExchange(&native_movie_calls,0,0) || movie_begin) {
+        retain_after_restore_failure(ERROR_BUSY);return FALSE;
+    }
     if (!movie_play_hook.installed) {
         installed_game_module = NULL;
         restore_quarantined = FALSE;
@@ -251,4 +264,37 @@ BOOL SudekiMpUninstallLanArenaStartupMovieSkip(void) {
 
 BOOL SudekiMpLanArenaStartupMovieSkipInstalled(void) {
     return movie_play_hook.installed && installed_game_module != NULL;
+}
+
+BOOL SudekiMpLanArenaMovieObserve(HMODULE image,SudekiMpMovieBegin begin,SudekiMpMovieEnd end) {
+    if(!image || !begin || !end || movie_begin || restore_quarantined ||
+        InterlockedCompareExchange(&native_movie_calls,0,0) ||
+        (movie_play_hook.installed && installed_game_module!=image)) {
+        SetLastError(ERROR_BUSY);return FALSE;
+    }
+    observer_owns_hook=!movie_play_hook.installed;
+    if(observer_owns_hook) {
+        if(!SudekiMpInstallLanArenaStartupMovieSkip(image)) { observer_owns_hook=FALSE;return FALSE; }
+        skip_logos=FALSE;
+    }
+    movie_begin=begin;movie_end=end;return TRUE;
+}
+BOOL SudekiMpLanArenaMovieUnobserve(void) {
+    if(InterlockedCompareExchange(&native_movie_calls,0,0)) { SetLastError(ERROR_BUSY);return FALSE; }
+    if(!movie_begin) return TRUE;
+    SudekiMpMovieBegin begin=movie_begin;SudekiMpMovieEnd end=movie_end;
+    movie_begin=NULL;movie_end=NULL;
+    if(observer_owns_hook && !SudekiMpUninstallLanArenaStartupMovieSkip()) {
+        movie_begin=begin;movie_end=end;return FALSE;
+    }
+    observer_owns_hook=FALSE;skip_logos=TRUE;return TRUE;
+}
+BOOL SudekiMpLanArenaMoviePlayInstalled(const char *name) {
+    if(!movie_begin || !installed_game_module || !movie_play_patch_still_owned() ||
+        InterlockedCompareExchange(&native_movie_calls,0,0)) return FALSE;
+    InterlockedIncrement(&native_movie_calls);
+    /* Retail returns bool in AL, accepts two cdecl stack arguments. Local
+     * client skip is disabled; the scoped movie-loop callback handles end. */
+    BOOL result=((MoviePlayFunction)movie_play_hook.trampoline)(name,FALSE)&0xff;
+    InterlockedDecrement(&native_movie_calls);return result;
 }

@@ -28,6 +28,8 @@ typedef void (__attribute__((thiscall)) *ExitCall)(void *);
 static uint8_t *base;
 static SudekiMpInlineHook hooks[HOOK_COUNT];
 static SRWLOCK state_lock=SRWLOCK_INIT;
+static DWORD vanilla_transition;
+static BOOL vanilla_transition_pending;
 static DWORD native_thread;
 static unsigned call_depth;
 static BOOL foreign_thread,exhausted,installed;
@@ -387,6 +389,8 @@ static uint32_t begin_zone(unsigned kind,const char *name) {
             kind,observed.temporary,remote_mask);
         remote_mask=0;
     }
+    vanilla_transition_pending=kind==TEMP || kind==EXIT;
+    if(vanilla_transition_pending) vanilla_transition=GetTickCount();
     increment(&observed.epoch);
     unknown_scene(SUDEKIMP_LAN_STORY_LOADING);
     if(kind==SET || kind==ENTER || kind==SWITCH || kind==MAIN) {
@@ -553,6 +557,16 @@ BOOL SudekiMpLanStoryObserverInstall(HMODULE module) {
     return TRUE;
 }
 
+static void publish_ready_membership(uint8_t mask,uint8_t lead) {
+    observed.phase=SUDEKIMP_LAN_STORY_READY;
+    vanilla_transition_pending=FALSE;
+    observed.available_mask=mask; observed.leader_seat=lead;
+    /* Vanilla TEMP places only the lead. Additional members require an
+     * explicit visit or this READY epoch's independent region observation. */
+    observed.inside_mask=(uint8_t)(!observed.temporary[0]?0u:
+        split_active?((1u<<lead)|(remote_mask&mask)):remote_mask?(remote_mask&mask):
+        ((1u<<lead)|(observed.inside_mask&mask)));
+}
 BOOL SudekiMpLanStoryObserverSample(void *controller,
     const SudekiMpControlUpdateDispatchWitness *w,SudekiMpLanStoryScene *out) {
     static const SudekiMpCleanroomActor actors[4]={SUDEKIMP_CLEANROOM_BUKI,
@@ -710,32 +724,45 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
             (unsigned long)observed.epoch,(unsigned long)observed.revision,last_descriptor,descriptor);
     }
     if(replaced) {
+        /* A scripted party removal can finish a split inside its TEMP (the
+         * castle arrival removes Ailish). Abandon the exterior lease, not
+         * this positively observed native destination. Never infer TEMP
+         * identity from a readable descriptor or an old zone name alone. */
+        BOOL replaced_temporary=FALSE;
+        if(split_active && exact && observed.temporary[0] &&
+            world==last_world && group==last_group && controller==last_controller) {
+            TemporaryWorldCopy current=temporary_world_copy(world);
+            replaced_temporary=current.exact && current.descriptor==descriptor &&
+                !current.pending && current.state==4u &&
+                !strcmp(current.current,observed.temporary);
+        }
         increment(&observed.epoch);
         if(remote_mask) {
             SudekiMpLogFormat("lan_story event=remote_interior_abandoned kind=replaced temporary=%s mask=%u\r\n",
                 observed.temporary,remote_mask);
-            remote_mask=0; memset(observed.temporary,0,sizeof(observed.temporary));
+            remote_mask=0;
+            if(!replaced_temporary) memset(observed.temporary,0,sizeof(observed.temporary));
         }
         if(split_active) {
             split_active=split_transition=split_exiting=FALSE;
             if(split_owner && split_owner->ended) split_owner->ended(TRUE);
-            memset(observed.temporary,0,sizeof(observed.temporary));
-            SudekiMpLogFormat("lan_story event=split_abandoned kind=replaced policy=vanilla_epoch\r\n");
+            if(!replaced_temporary) memset(observed.temporary,0,sizeof(observed.temporary));
+            observed.inside_mask=0; /* Re-prove membership from the new lead. */
+            if(!replaced_temporary && exact && *(uint32_t *)(descriptor+0x34u)==4u)
+                exact=FALSE; /* A foreign/unproved TEMP never publishes READY. */
+            SudekiMpLogFormat("lan_story event=split_abandoned kind=replaced policy=vanilla_epoch temporary_retained=%u\r\n",
+                (unsigned)replaced_temporary);
         }
     }
     if(exact) {
-        observed.phase=SUDEKIMP_LAN_STORY_READY;
-        observed.available_mask=mask; observed.leader_seat=lead;
-        /* Whole native party shares the host's current area unless a split
-         * owner moved only the lead. */
+        /* Drop incompatible explicit visits before publishing membership. */
         if(remote_mask && (!(mask&remote_mask) || (remote_mask&(1u<<lead)))) {
             SudekiMpLogFormat("lan_story event=remote_interior_dropped mask=%u available=%u lead=%u\r\n",
                 remote_mask,mask,lead);
             remote_mask=0;
             if(!split_active) memset(observed.temporary,0,sizeof(observed.temporary));
         }
-        observed.inside_mask=(uint8_t)(!observed.temporary[0]?0u:
-            split_active?((1u<<lead)|(remote_mask&mask)):remote_mask?(remote_mask&mask):mask);
+        publish_ready_membership(mask,lead);
         set_retained();
         if(split_transition) {
             BOOL leaving=split_exiting;
@@ -1078,7 +1105,7 @@ BOOL SudekiMpLanStoryObserverUninstall(void) {
     if(ok) {
         split_owner=NULL; split_active=split_transition=split_exiting=FALSE;
         memset(resident_house,0,sizeof(resident_house));
-        remote_mask=0; remote_evict=NULL; remote_lead_entry=NULL; background_switch_tick=hold_started=hold_ended=0; holding=FALSE; local_transition=0;
+        remote_mask=0; remote_evict=NULL; remote_lead_entry=NULL; vanilla_transition=0; vanilla_transition_pending=FALSE; background_switch_tick=hold_started=hold_ended=0; holding=FALSE; local_transition=0;
         memset(visit_zone,0,sizeof(visit_zone)); split_began_call=local_began_call=FALSE;
         memset(last_temp_zone,0,sizeof(last_temp_zone)); memset(last_temp_marker,0,sizeof(last_temp_marker));
         base=NULL; installed=FALSE; native_thread=0; exhausted=FALSE;
@@ -1154,12 +1181,49 @@ BOOL SudekiMpLanStoryObserverPublished(SudekiMpLanStoryScene *out) {
     ReleaseSRWLockShared(&state_lock);
     return ok;
 }
-BOOL SudekiMpLanStoryObserverIdentityUnknown(void) {
-    if(SudekiMpLanStoryObserverWorldLoading() || SudekiMpLanStoryObserverHolding()) return TRUE;
+DWORD SudekiMpLanStoryObserverBackgroundSwitchTick(void) {
     AcquireSRWLockShared(&state_lock);
-    BOOL recent=installed && background_switch_tick && GetTickCount()-background_switch_tick<5000u;
+    DWORD tick=installed && native_thread==GetCurrentThreadId() && background_switch_tick &&
+        GetTickCount()-background_switch_tick<20000u?background_switch_tick:0;
+    ReleaseSRWLockShared(&state_lock);return tick;
+}
+BOOL SudekiMpLanStoryObserverSwitchMember(unsigned c,SudekiMpLanStorySwitchMember *out) {
+    AcquireSRWLockShared(&state_lock);
+    BOOL ok=FALSE;
+    if(out && c<4u && base && installed && !foreign_thread && native_thread==GetCurrentThreadId() &&
+        readable(base+0x408d10u,4u) && *(void **)(base+0x408d10u)==last_world) {
+        uint8_t *actor=last_actors[c],*ai,*position,*mode;
+        if(readable(actor,0x98u) && readable(ai=*(uint8_t **)(actor+0x94u),0x16cu) &&
+            *(void **)(ai+0x10u)==actor && readable(position=*(uint8_t **)(actor+0x44u),0x24u) &&
+            *(void **)(position+0x10u)==actor && readable(mode=*(uint8_t **)(ai+0x3cu),0xcu)) {
+            memcpy(out->position,position+0x18u,sizeof(out->position));
+            out->pause_refs=actor[0x2bu];out->ai_override=*(int16_t *)(ai+0x16au);out->ai_mode=mode[0xbu];ok=TRUE;
+        }
+    }
+    ReleaseSRWLockShared(&state_lock);return ok;
+}
+BOOL SudekiMpLanStoryObserverIdentityUnknown(void) {
+    AcquireSRWLockShared(&state_lock);
+    BOOL vanilla=installed && vanilla_transition_pending && observed.phase!=SUDEKIMP_LAN_STORY_READY;
+    BOOL recent=vanilla && GetTickCount()-vanilla_transition<20000u;
+    BOOL background=installed && background_switch_tick && GetTickCount()-background_switch_tick<5000u;
     ReleaseSRWLockShared(&state_lock);
-    return recent;
+    /* EXIT looks like a world load after clearing the temporary name. Its
+     * general loading witness must not bypass this transition's deadline. */
+    if(vanilla) return recent;
+    return background || SudekiMpLanStoryObserverWorldLoading() || SudekiMpLanStoryObserverHolding();
+}
+
+BOOL SudekiMpLanStoryObserverSetInsideMembership(uint32_t epoch,uint32_t revision,uint8_t mask) {
+    AcquireSRWLockExclusive(&state_lock);
+    BOOL ok=installed && native_thread==GetCurrentThreadId() && !call_depth && !split_active && !remote_mask &&
+        observed.phase==SUDEKIMP_LAN_STORY_READY && observed.temporary[0] && observed.leader_seat<4u &&
+        epoch==observed.epoch && revision==observed.revision && !(mask&~observed.available_mask) &&
+        (mask&(1u<<observed.leader_seat));
+    if(ok && (observed.inside_mask|mask)!=observed.inside_mask) {
+        observed.inside_mask|=mask; increment(&observed.revision); published=observed;
+    }
+    ReleaseSRWLockExclusive(&state_lock); return ok;
 }
 void SudekiMpLanStoryObserverNoteResidentHouse(const char *zone) {
     AcquireSRWLockExclusive(&state_lock);

@@ -115,10 +115,17 @@ BOOL SudekiMpLanStoryObserverHolding(void);
  * was requested within the last 5 s (its first native frame can fail an
  * identity proof before any sample observes it). */
 BOOL SudekiMpLanStoryObserverIdentityUnknown(void);
+/* Default-off TPtrAudit consumer, native service seam only; 0 outside window. */
+DWORD SudekiMpLanStoryObserverBackgroundSwitchTick(void);
+typedef struct SudekiMpLanStorySwitchMember {
+    float position[3]; int16_t ai_override; uint8_t pause_refs,ai_mode;
+} SudekiMpLanStorySwitchMember;
+BOOL SudekiMpLanStoryObserverSwitchMember(unsigned character,SudekiMpLanStorySwitchMember *out);
 /* The last published READY scene (no native proof; callers re-prove). */
 BOOL SudekiMpLanStoryObserverPublished(SudekiMpLanStoryScene *out);
 /* The zone and authored arrival marker (ResourceName text) of the last
  * native TEMP entry on this machine; FALSE when none or too long. */
 BOOL SudekiMpLanStoryObserverLastTemporary(char zone[40],char marker[40]);
 
+BOOL SudekiMpLanStoryObserverSetInsideMembership(uint32_t epoch,uint32_t revision,uint8_t mask);
 #endif

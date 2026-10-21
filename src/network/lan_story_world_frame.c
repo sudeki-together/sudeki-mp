@@ -5,6 +5,8 @@
 _Static_assert(sizeof(float)==4u,"World presentation requires binary32");
 _Static_assert(SUDEKIMP_LAN_STORY_WORLD_CHUNK_MAX_SIZE+28u<=1468u,
     "World presentation chunk exceeds the SMP4 datagram limit");
+_Static_assert(SUDEKIMP_LAN_STORY_WORLD_MAX_CHUNKS*SUDEKIMP_LAN_STORY_WORLD_CHUNK_ACTORS>=
+    SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS,"World chunks must cover the actor table");
 
 static uint16_t get16(const uint8_t *p) { return (uint16_t)(p[0]|((uint16_t)p[1]<<8)); }
 static uint32_t get32(const uint8_t *p) {

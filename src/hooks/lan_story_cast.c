@@ -37,6 +37,7 @@ static uint64_t lifetime,lifetime_serial;
 static DWORD native_thread,last_service;
 static DWORD bind_deferred_at;
 static BOOL bind_deferred;
+static BOOL retire_superseded;
 static BOOL bound,initializing,initialized,context_owned,menu_owned,skill_routed,spirit_routed,task_routed;
 static BOOL effects_owned,missiles_owned,stopping,fault;
 static BOOL visuals_owned,audio_owned;
@@ -64,6 +65,29 @@ static int index_of(void *actor) {
 static BOOL exact(void) {
     return image && native_thread==GetCurrentThreadId() &&
         SudekiMpLanStoryObserverNativeRosterExact(&owners);
+}
+static BOOL same_cast_owners(const SudekiMpLanStoryNativeRoster *r) {
+    return r && r->available_mask==owners.available_mask && r->leader_character==owners.leader_character &&
+        r->world==owners.world && r->group==owners.group && r->controller==owners.controller &&
+        !memcmp(r->actors,owners.actors,sizeof(r->actors)) && !memcmp(r->ai,owners.ai,sizeof(r->ai));
+}
+static BOOL superseded_roster(SudekiMpLanStoryNativeRoster *out) {
+    SudekiMpLanStoryScene scene;
+    if(!bound || !image || native_thread!=GetCurrentThreadId() ||
+        !SudekiMpLanStoryObserverPublished(&scene) || scene.epoch==owners.epoch) return FALSE;
+    *out=owners; out->epoch=scene.epoch; out->revision=scene.revision;
+    return SudekiMpLanStoryObserverNativeRosterExact(out);
+}
+BOOL SudekiMpLanStoryCastSuperseded(void) {
+    SudekiMpLanStoryNativeRoster current;
+    return superseded_roster(&current);
+}
+/* Supplied service rosters have already been proved by the runtime. Recheck
+ * here at this public boundary; the new epoch grants no new object identity. */
+static BOOL rebase_owners(const SudekiMpLanStoryNativeRoster *r) {
+    if(!bound || !r || r->epoch==owners.epoch || !same_cast_owners(r) ||
+        !SudekiMpLanStoryObserverNativeRosterExact(r)) return FALSE;
+    owners=*r; retire_superseded=stopping=TRUE; return TRUE;
 }
 static BOOL retained_actor(void *actor,uint64_t generation) {
     int i=index_of(actor);
@@ -425,7 +449,7 @@ BOOL SudekiMpLanStoryCastLocalNoncaster(void *actor) {
 }
 BOOL SudekiMpLanStoryCastInstall(HMODULE module) {
     if(image || !module || !SudekiMpCheckLoadedExecutable(module) || !SudekiMpLanStoryRealtimeExact(module)) return FALSE;
-    image=module; stopping=fault=bind_deferred=FALSE; return TRUE;
+    image=module; retire_superseded=FALSE; stopping=fault=bind_deferred=FALSE; return TRUE;
 }
 static BOOL bind_casters(const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryNativeRoster *r) {
     if(!r || !SudekiMpLanStoryObserverRosterStillExact(w,r) || !r->available_mask || r->leader_character>=4u)
@@ -558,15 +582,19 @@ BOOL SudekiMpLanStoryCastTryBind(const SudekiMpControlUpdateDispatchWitness *w,
     if(!image || stopping || fault || initializing || !w || !w->service_post_original_exact ||
         !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)) return FALSE;
     if(bind_deferred && GetTickCount()-bind_deferred_at<1000u) return TRUE;
-    return bound ? exact() : bind_casters(w,r);
+    return bound ? (exact() || rebase_owners(r)) : bind_casters(w,r);
 }
 BOOL SudekiMpLanStoryCastService(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r) {
     if(!image) return TRUE;
     if(!w || !w->service_post_original_exact || !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)) return FALSE;
-    (void)r;
     if(!bound) return !fault && !initializing;
-    if(!exact() || !SudekiMpLanCastContextPoll() || !SudekiMpLanPartyEffectLifetimePoll() ||
+    if(!exact() && !rebase_owners(r)) {
+        if(SudekiMpLanStoryObserverIdentityUnknown()) return TRUE;
+        fault=TRUE; return FALSE;
+    }
+    if(retire_superseded) stopping=TRUE;
+    if(!SudekiMpLanCastContextPoll() || !SudekiMpLanPartyEffectLifetimePoll() ||
         !SudekiMpLanPartyProjectileLifetimePoll()) { fault=TRUE; return FALSE; }
     DWORD now=GetTickCount();
     float seconds=last_service && now-last_service<=100u?(float)(now-last_service)/1000.0f:0;
@@ -623,6 +651,14 @@ BOOL SudekiMpLanStoryCastService(const SudekiMpControlUpdateDispatchWitness *w,
             !SudekiMpLanCastContextSetTaskRouting(NULL,NULL)) { fault=TRUE; return FALSE; }
         task_routed=FALSE;
         SudekiMpLogWrite("story_cast event=task_routing active=0 reason=fully_drained\r\n");
+    }
+    if(retire_superseded && !fault && all_idle() &&
+        !SudekiMpLanPartyEffectLifetimeRetains() && !SudekiMpLanPartyProjectileLifetimeRetains()) {
+        HMODULE module=image;
+        if(!SudekiMpLanStoryCastUninstall()) return FALSE;
+        /* Return to the installed/unbound state. The runtime's existing
+         * READY path alone may construct the replacement namespaces. */
+        return SudekiMpLanStoryCastInstall(module);
     }
     return !fault;
 }
@@ -731,6 +767,10 @@ BOOL SudekiMpLanStoryCastRetains(void) {
 BOOL SudekiMpLanStoryCastUninstall(void) {
     stopping=TRUE;
     if(!image) return TRUE;
+    /* Destruction invokes retained_actor from the light owner. Rebase once
+     * under a fresh name/roster proof before asking whether all tails drained. */
+    SudekiMpLanStoryNativeRoster current;
+    if(superseded_roster(&current)) owners=current;
     if(initializing || submitting>=0 || (native_thread && native_thread!=GetCurrentThreadId()) ||
         (initialized && !all_idle()) || SudekiMpLanPartyEffectLifetimeRetains() ||
         SudekiMpLanPartyProjectileLifetimeRetains()) { SetLastError(ERROR_BUSY); return FALSE; }
@@ -757,7 +797,7 @@ BOOL SudekiMpLanStoryCastUninstall(void) {
     if(initialized && !SudekiMpResetSpiritInstanceAbi()) return FALSE;
     initialized=FALSE;
     if(context_owned && !SudekiMpUninstallLanCastContext()) return FALSE;
-    context_owned=bound=bind_deferred=FALSE; native_thread=last_service=0; lifetime=0;
+    context_owned=bound=bind_deferred=retire_superseded=FALSE; native_thread=last_service=0; lifetime=0;
     memset(caster,0,sizeof(caster)); memset(&owners,0,sizeof(owners)); image=NULL;
     return TRUE;
 }

@@ -2,6 +2,7 @@
 #define SUDEKIMP_LAN_PARTY_SESSION_H
 
 #include "network/lan_story_area_state.h"
+#include "network/story_movie.h"
 #include "network/lan_story_effect_state.h"
 #include "network/lan_story_vfx.h"
 #include "network/lan_story_audio.h"
@@ -463,5 +464,13 @@ BOOL SudekiMpLanPartyGetStoryAudio(SudekiMpLanPartySession *session,const Sudeki
 BOOL SudekiMpLanPartyPublishStoryXp(SudekiMpLanPartySession *,const SudekiMpStoryXp *);
 BOOL SudekiMpLanPartyGetStoryXp(SudekiMpLanPartySession *,const SudekiMpLanPartyLease *,
     uint32_t now,SudekiMpStoryXp *,uint32_t *received_age);
+
+/* Movie events are independently sequenced, connection-fenced and repeated by
+ * Poll while the host's game thread is blocked. Capability is per connection;
+ * older peers ignore this optional presentation channel. */
+BOOL SudekiMpLanPartyMovieBegin(SudekiMpLanPartySession *session,uint32_t now,SudekiMpStoryMovie *movie);
+void SudekiMpLanPartyMovieEnd(SudekiMpLanPartySession *session,const SudekiMpStoryMovie *movie,uint32_t now);
+BOOL SudekiMpLanPartyMovieGet(SudekiMpLanPartySession *session,uint32_t now,
+    SudekiMpLanPartyLease *lease,SudekiMpStoryMovie *movie);
 
 #endif

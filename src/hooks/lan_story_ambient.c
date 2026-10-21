@@ -4,6 +4,7 @@
 #include "engine/build_identity.h"
 #include "engine/log.h"
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #if !defined(__GNUC__) || !defined(__i386__)
 #error "Ambient animation requires the supported x86 ABI"
@@ -26,7 +27,7 @@ static DWORD active_thread;
 static volatile LONG trail_callbacks;
 void *SudekiMpLanStoryAmbientWaterTrampoline __attribute__((used));
 enum { UPDATE_RVA=0x222b50, UPDATE_LENGTH=5, VTABLE_RVA=0x2df8ec, FRAME_STAMP=0x3c3150,
-       MAX_OWNED=128, LEASE_MS=500, MAX_DT_MS=50, GAP_MS=250, REFRESH_MS=250 };
+       MAX_OWNED=8200, LEASE_MS=500, MAX_DT_MS=50, GAP_MS=250, REFRESH_MS=250 };
 static const uint8_t update_bytes[UPDATE_LENGTH]={0xd9,0x44,0x24,0x08,0x53};
 static SudekiMpInlineHook hook;
 void *SudekiMpLanStoryAmbientTrampoline __attribute__((used));
@@ -36,7 +37,22 @@ static volatile LONG active; static volatile DWORD active_tick;
 static uint16_t frame_seen; static BOOL frame_valid;
 static LARGE_INTEGER frequency,last_frame;
 static uint32_t frame_dt_bits;
+static uint32_t owned_serial;
 static void *owned[MAX_OWNED]; static unsigned owned_count; static DWORD owned_tick;
+static int renderer_order(const void *a,const void *b) {
+    uintptr_t x=(uintptr_t)*(void *const *)a,y=(uintptr_t)*(void *const *)b;
+    return x<y?-1:x>y;
+}
+static BOOL owns_renderer(uintptr_t renderer) {
+    unsigned low=0,high=owned_count;
+    while(low<high) {
+        unsigned mid=low+(high-low)/2u;
+        uintptr_t value=(uintptr_t)owned[mid];
+        if(value<renderer) low=mid+1u;
+        else high=mid;
+    }
+    return low<owned_count && (uintptr_t)owned[low]==renderer;
+}
 static uint32_t substituted,excluded,passthrough,expired; static DWORD logged; static unsigned logs;
 static BOOL readable_code(const void *p,size_t n) {
     MEMORY_BASIC_INFORMATION m; uintptr_t a=(uintptr_t)p;
@@ -65,6 +81,12 @@ void SudekiMpLanStoryAmbientSetActive(BOOL on) {
  * dispatcher pass): wall-clock seconds since the previous frame, capped at
  * 50 ms; a gap above 250 ms yields zero so a stall never replays as a burst. */
 static void refresh_frame(DWORD now) {
+    uint32_t serial=SudekiMpLanStoryWorldOwnershipSerial();
+    if(!owned_tick || now-owned_tick>=REFRESH_MS || serial!=owned_serial) {
+        owned_count=SudekiMpLanStoryWorldOwnedRenderers(owned,MAX_OWNED);
+        qsort(owned,owned_count,sizeof(owned[0]),renderer_order);
+        owned_tick=now?now:1u; owned_serial=serial;
+    }
     uint16_t stamp=*(const uint16_t *)(base+FRAME_STAMP);
     if(frame_valid && stamp==frame_seen) return;
     LARGE_INTEGER t; QueryPerformanceCounter(&t);
@@ -75,10 +97,6 @@ static void refresh_frame(DWORD now) {
     }
     last_frame=t; frame_seen=stamp; frame_valid=TRUE;
     memcpy(&frame_dt_bits,&dt,sizeof(dt));
-    if(!owned_tick || now-owned_tick>=REFRESH_MS) {
-        owned_count=SudekiMpLanStoryWorldOwnedRenderers(owned,MAX_OWNED);
-        owned_tick=now?now:1u;
-    }
 }
 /* Runs at the native entry on the caller's thread with a clean FP state.
  * Only the incoming dt argument slot may be written, and only from zero. */
@@ -89,7 +107,7 @@ static void __attribute__((used,noinline)) observe(uintptr_t renderer,uint32_t *
     if(!InterlockedCompareExchange(&active,0,0) || now-active_tick>LEASE_MS) { ++expired; goto done; }
     if(*dt_slot!=0u) { ++passthrough; goto done; }
     refresh_frame(now);
-    for(unsigned i=0;i<owned_count;++i) if(owned[i]==(void *)renderer) { ++excluded; goto done; }
+    if(owns_renderer(renderer)) { ++excluded; goto done; }
     if(frame_dt_bits) { *dt_slot=frame_dt_bits; ++substituted; }
 done:
     if(SudekiMpLogResearchEnabled() && now-logged>=2000u && logs<300u) {

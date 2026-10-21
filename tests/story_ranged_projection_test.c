@@ -3,6 +3,7 @@
 #include "../src/hooks/lan_story_world.c"
 #include <assert.h>
 #include <stdio.h>
+void SudekiMpLogFormat(const char *format, ...) { (void)format; }
 
 typedef struct TestRenderer {
     uint8_t wrapper[0x14],object[0xd0],renderer[0xb0],bank[0x5c],description[0x24];
@@ -74,20 +75,33 @@ static void effect_renderer_ownership(void) {
     pointer(spawns,0x78,npc+0x2c);
     void *with_npc[131]; memcpy(with_npc,entries,sizeof(entries)); with_npc[130]=npc;
     word(owner,0x34,131); pointer(owner,0x3c,with_npc); pointer(base,0x409d8c,owner);
-    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==2 && out[1]==npc_renderer); /* no local shop */
+    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==2 && out[1]==npc_renderer); /* client_seen is still FALSE */
     SudekiMpLanStoryWorldSetLocalZone(zone);
     BOOL seen=client_seen; unsigned bound=client_count; client_seen=FALSE;
+    assert(!SudekiMpLanStoryWorldLocalIdleNpc(npc));
     assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==2);                     /* unknown: owned */
     client_seen=TRUE; client_count=0;
+    assert(SudekiMpLanStoryWorldLocalIdleNpc(npc));
     assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==1 && out[0]==renderers[129]); /* idles locally */
     client_bound[0].target.entity=npc; client_count=1;
+    assert(!SudekiMpLanStoryWorldLocalIdleNpc(npc));
     assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==2);                     /* host-posed: owned */
     client_bound[0].target.entity=NULL; client_count=0;
     pointer(spawns,0x78,actor+0x2c);
-    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==2);                     /* not this shop's */
+    assert(!SudekiMpLanStoryWorldLocalIdleNpc(npc));
+    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==1);                     /* Q1: unbound NPC idles locally, not only shop NPCs */
     pointer(spawns,0x78,npc+0x2c); pointer(zone,0,base);
-    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==2);                     /* unproved zone */
-    SudekiMpLanStoryWorldSetLocalZone(NULL); client_seen=seen; client_count=bound;
+    assert(!SudekiMpLanStoryWorldLocalIdleNpc(npc));
+    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==1);                     /* Q1: independent of shop proof */
+    pointer(zone,0,base+0x2cdcdcu);
+    uint32_t zone_serial=SudekiMpLanStoryWorldOwnershipSerial();
+    SudekiMpLanStoryWorldSetLocalZone(zone);
+    assert(SudekiMpLanStoryWorldOwnershipSerial()==zone_serial);
+    SudekiMpLanStoryWorldSetLocalZone(NULL);
+    assert(SudekiMpLanStoryWorldOwnershipSerial()==zone_serial+1u);
+    assert(!SudekiMpLanStoryWorldLocalIdleNpc(npc));
+    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==1);
+    client_seen=seen; client_count=bound;
     pointer(base,0x409d8c,NULL);
 }
 static void hit_reactions(Fixture *f,Target t) {

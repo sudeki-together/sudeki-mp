@@ -26,6 +26,11 @@ void SudekiMpLanStoryWorldSetExcludedHouse(const void *zone_data);
 /* H1b client: the zone data of the shop this client entered locally (NULL
  * clears). Its NPCs the host does not pose keep their native idle clock. */
 void SudekiMpLanStoryWorldSetLocalZone(const void *zone_data);
+/* Read-only game-thread serial. Bumped for client bound-set/client_seen changes
+ * in ApplyPrepared bind/rebind and Begin/FinishRecruitment, a changed local
+ * shop zone pointer, and uninstall. Registry membership, vtables and renderer
+ * wrapper pointers still reach ambient ownership through its 250 ms refresh. */
+uint32_t SudekiMpLanStoryWorldOwnershipSerial(void);
 /* Host only. TRUE freezes the exterior catalog as the (kind,identifier) set of
  * the last successful capture; while frozen, other registry entities (an
  * occupied split-area TEMP's objects) are left out. FALSE releases it. */
@@ -80,6 +85,10 @@ BOOL SudekiMpLanStoryWorldApply(const SudekiMpLanStoryNativeRoster *roster,
  * may occur while prepared; successful Prepare keeps the module active.
  * independent_view hides the exact authored telescope lens overlay from a
  * companion's own camera; shared spectators follow host visibility. */
+/* Closed castle membership edge, authorized by the runtime's fresh scene,
+ * connection and generation journal. Full native roster remains contained.
+ * A fresh matching catalog is still required; the grant owns no objects. */
+void SudekiMpLanStoryWorldPermitArrivalEpoch(const SudekiMpLanStoryNativeRoster *,uint32_t before,uint32_t after);
 BOOL SudekiMpLanStoryWorldPrepare(const SudekiMpLanStoryNativeRoster *roster,
     const SudekiMpLanStoryWorldFrame *frame, SudekiMpLanStoryReplicaExact exact,
     void *context,BOOL independent_view);

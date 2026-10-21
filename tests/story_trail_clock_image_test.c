@@ -9,6 +9,7 @@
 #include "../src/hooks/lan_story_ambient.c"
 static BOOL owner_valid=TRUE;
 static void *expected_parent,*expected_child;
+uint32_t SudekiMpLanStoryWorldOwnershipSerial(void) { return 0; }
 unsigned SudekiMpLanStoryWorldOwnedRenderers(void **out,unsigned max) { (void)out;(void)max;return 0; }
 BOOL SudekiMpLanStoryWorldTrailOwner(void *parent,void *child,unsigned slot) {
     return owner_valid && parent==expected_parent && child==expected_child && slot==1u;

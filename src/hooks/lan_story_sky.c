@@ -36,7 +36,19 @@ static uint32_t next_serial;
 static SudekiMpStorySkyCall latest[SUDEKIMP_STORY_SKY_KINDS];
 static char latest_fog[SUDEKIMP_STORY_AREA_NAME];
 static uint32_t applied[SUDEKIMP_STORY_SKY_KINDS];
-static unsigned logs;
+static unsigned logs,follow_logs;
+static BOOL client_follow;
+static struct { BOOL active; float from[4],to[4],duration; DWORD started; } blend;
+void SudekiMpLanStorySkySetClient(BOOL client) { if(!base) client_follow=client; }
+static void local_override(unsigned kind) {
+    if(!client_follow) return;
+    if(kind<=SUDEKIMP_STORY_SKY_BRIGHTNESS) {
+        for(unsigned i=0;i<=SUDEKIMP_STORY_SKY_BRIGHTNESS;++i) applied[i]=0;
+        blend.active=FALSE;
+    } else if(kind<SUDEKIMP_STORY_SKY_KINDS) applied[kind]=0;
+    if(follow_logs<64u) {++follow_logs;
+        SudekiMpLogFormat("story_sky event=local_override kind=%u\r\n",kind);}
+}
 
 static BOOL readable(const void *p,size_t n) {
     MEMORY_BASIC_INFORMATION m; uintptr_t a=(uintptr_t)p;
@@ -50,6 +62,7 @@ static uint32_t bits(float f) { uint32_t u; memcpy(&u,&f,4); return u; }
 static float flt(uint32_t u) { float f; memcpy(&f,&u,4); return f; }
 static void record(unsigned kind,const uint32_t *args,unsigned n) {
     if(replaying || GetCurrentThreadId()!=native_thread) return;
+    local_override(kind);
     if(++next_serial==0u) next_serial=1u;
     memset(&latest[kind],0,sizeof(latest[kind]));
     latest[kind].serial=next_serial; memcpy(latest[kind].args,args,n*4u);
@@ -239,6 +252,7 @@ static char dome_name[SUDEKIMP_STORY_AREA_NAME];
 typedef void (__attribute__((thiscall)) *Dome)(void *,void *);
 static void __attribute__((thiscall)) dome_hook_fn(void *self,void *resource) {
     if(self==scene() && !replaying && GetCurrentThreadId()==native_thread) {
+        if(client_follow) {dome_applied=0;local_override(SUDEKIMP_STORY_SKY_KINDS);}
         const uint32_t *r=resource; char name[SUDEKIMP_STORY_AREA_NAME]={0};
         const uint32_t *rec=readable(r,12u)?(const uint32_t *)(uintptr_t)r[2]:NULL;
         const char *t=readable(rec,8u)?(const char *)(uintptr_t)rec[1]:NULL; unsigned k=0;
@@ -278,6 +292,9 @@ BOOL SudekiMpLanStorySkyInstall(HMODULE image) {
         SetLastError(error); return FALSE;
     }
     base=b; native_thread=GetCurrentThreadId();
+    memset(applied,0,sizeof(applied)); dome_applied=light_applied=0;
+    memset(&blend,0,sizeof(blend)); follow_logs=0;
+    if(client_follow) {++follow_logs;SudekiMpLogWrite("story_sky event=follow_reset reason=install\r\n");}
     SudekiMpLogWrite("story_sky event=installed\r\n");
     return TRUE;
 }
@@ -287,7 +304,7 @@ BOOL SudekiMpLanStorySkyUninstall(void) {
     if(dome_hook.installed && !SudekiMpRestoreInlineHook(&dome_hook)) ok=FALSE;
     for(unsigned i=LIGHT_HOOKS;i--;) if(light_hooks[i].installed && !SudekiMpRestoreInlineHook(&light_hooks[i])) ok=FALSE;
     for(unsigned i=SUDEKIMP_STORY_SKY_KINDS;i--;) if(hooks[i].installed && !SudekiMpRestoreInlineHook(&hooks[i])) ok=FALSE;
-    if(ok) { light_hold=FALSE; held_count=held_dropped=0; }
+    if(ok) { light_hold=FALSE; held_count=held_dropped=0; base=NULL; native_thread=0; }
     return ok;
 }
 static void fog_state_log(const char *side);
@@ -387,7 +404,6 @@ void SudekiMpLanStorySkyCapture(SudekiMpStoryEffectState *out) {
  * is a blend of the current colour) is stepped here instead, by calling the
  * immediate native SetSkyDomeColour with the interpolated colour each
  * service. Colour word (+0x5C/+0x60): b, g, r, (1-alpha)*255. */
-static struct { BOOL active; float from[4],to[4],duration; DWORD started; } blend;
 static void current_colour(const uint8_t *scene_object,float out[4]) {
     uint32_t w=readable(scene_object+0x60u,4u)?*(const uint32_t *)(scene_object+0x60u):0u;
     out[0]=(float)((w>>16)&0xffu); out[1]=(float)((w>>8)&0xffu); out[2]=(float)(w&0xffu);
@@ -522,7 +538,7 @@ void SudekiMpLanStorySkyHoldLighting(BOOL hold) {
     light_hold=hold;
 }
 void SudekiMpLanStorySkyReleaseHeld(BOOL apply) {
-    unsigned count=held_count,applied=0;
+    unsigned count=held_count,released_count=0;
     light_hold=FALSE; held_count=0;
     if(apply && base) for(unsigned i=0;i<count;++i) {
         /* Through the exports: the hooks record them for clients as usual. */
@@ -530,16 +546,16 @@ void SudekiMpLanStorySkyReleaseHeld(BOOL apply) {
         for(unsigned a=0;a<4u;++a) f[a]=flt(c->args[a]);
         unsigned k=c->kind-1u; void *s=scene();
         switch(c->kind) {
-        case SUDEKIMP_STORY_LIGHT_AMBIENT: if(s) { ((Ambient)(base+light_rvas[k]))(s,f[0],f[1],f[2]); ++applied; } break;
+        case SUDEKIMP_STORY_LIGHT_AMBIENT: if(s) { ((Ambient)(base+light_rvas[k]))(s,f[0],f[1],f[2]); ++released_count; } break;
         case SUDEKIMP_STORY_LIGHT_GROUP_SET: case SUDEKIMP_STORY_LIGHT_GROUP_INC:
-            if(c->args[0]<64u) { ((Group)(base+light_rvas[k]))((int)c->args[0],f[1],f[2],f[3]); ++applied; } break;
-        case SUDEKIMP_STORY_LIGHT_BRIGHTNESS: ((One)(base+light_rvas[k]))(f[0]); ++applied; break;
+            if(c->args[0]<64u) { ((Group)(base+light_rvas[k]))((int)c->args[0],f[1],f[2],f[3]); ++released_count; } break;
+        case SUDEKIMP_STORY_LIGHT_BRIGHTNESS: ((One)(base+light_rvas[k]))(f[0]); ++released_count; break;
         case SUDEKIMP_STORY_LIGHT_COLOUR_ADJUST: case SUDEKIMP_STORY_LIGHT_BACKGROUND:
-            ((Three)(base+light_rvas[k]))(f[0],f[1],f[2]); ++applied; break;
+            ((Three)(base+light_rvas[k]))(f[0],f[1],f[2]); ++released_count; break;
         default: break;
         }
     }
-    if(count || held_dropped) SudekiMpLogFormat("story_sky event=light_hold_released apply=%u held=%u applied=%u dropped=%u\r\n",
-        (unsigned)apply,count,applied,held_dropped);
+    if(count || held_dropped) SudekiMpLogFormat("story_sky event=light_hold_released apply=%u held=%u released_count=%u dropped=%u\r\n",
+        (unsigned)apply,count,released_count,held_dropped);
     held_dropped=0;
 }

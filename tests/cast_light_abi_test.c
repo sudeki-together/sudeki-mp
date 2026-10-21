@@ -39,6 +39,7 @@ static void fixture(void) {
 #undef A
 #undef B
 }
+static BOOL epoch_unknown(void) {return TRUE;}
 static BOOL witness(void *actor,uint64_t session) {
     return actor_valid && (actor==&actors[0] || actor==&actors[1]) && session==7;
 }
@@ -130,6 +131,10 @@ int main(void) {
     CHECK(!SudekiMpCreateCastLight(11,&actors[1],7,witness));
     CHECK(!SudekiMpCreateCastLight(33,&actors[1],8,witness));
     CHECK(registrations==2);
+    actor_valid=FALSE;SudekiMpCastLightSetUnknownWitness(epoch_unknown);
+    CHECK(lm_owner_unknown(lm_find(11)) && SudekiMpCastLightTransient());
+    light_fault=TRUE;CHECK(!lm_owner_unknown(lm_find(11)) && !SudekiMpCastLightTransient());light_fault=FALSE;
+    SudekiMpCastLightSetUnknownWitness(NULL);CHECK(!lm_owner_unknown(lm_find(11)));actor_valid=TRUE;
     a=lm_find(11)->object; b=lm_find(22)->object;
     *(int16_t *)(a+0x20)=-1;
     CHECK(!SudekiMpReadCastLight(11,current,baseline) && !SudekiMpCastLightTransitionReady(11));

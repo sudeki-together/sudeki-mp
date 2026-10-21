@@ -16,7 +16,7 @@ void SudekiMpLogFormat(const char *format,...) {
     ++diagnostic_count;
     fputs(last_diagnostic,stdout);
 }
-void SudekiMpLogWrite(const char *text) {(void)text;}
+void SudekiMpLogWrite(const char *text) {if(strstr(text,"begin_refused"))++diagnostic_count;}
 BOOL SudekiMpLogResearchEnabled(void) {return FALSE;}
 void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor) {
     static const SudekiMpCleanroomActor types[4]={SUDEKIMP_CLEANROOM_BUKI,
@@ -42,7 +42,7 @@ BOOL SudekiMpLanStoryTempExteriorUninstall(void) {assert(!"unused");return FALSE
 BOOL SudekiMpLanStoryObserverSetSplit(const SudekiMpLanStoryObserverSplit *owner) {(void)owner;assert(!"unused");return FALSE;}
 static void state(void) {
     base=(uint8_t *)(uintptr_t)1;active=settled_inside=FALSE;attached=observer_set=host_ready=TRUE;
-    outside_mask=4;native_thread=GetCurrentThreadId();
+    outside_mask=4;away_mask=0;memset(parked,0,sizeof(parked));native_thread=GetCurrentThreadId();
     temporary_data=NULL;memset(temporary,0,sizeof(temporary));
     memset(&residency,0,sizeof(residency));memset(fixture_actors,0,sizeof(fixture_actors));
     exempt_count=0;exempt_group=NULL;memset(exempt_actor,0,sizeof(exempt_actor));
@@ -204,7 +204,7 @@ static void returned_residency(void) {
         fixture_actor_bytes[c][0x2b]=2;
         assert(SudekiMpLanStorySplitReturnedActorExact(&fixture_roster,c) && fixture_actor_bytes[c][0x2b]==2);
         fixture_actor_bytes[c][0x2b]=0;
-        SudekiMpLanStorySplitSetEligibility(TRUE,15u); /* scene ready != input ready */
+        SudekiMpLanStorySplitSetEligibility(TRUE,15u,0u); /* scene ready != input ready */
         assert(SudekiMpLanStorySplitReturnedActorExact(&fixture_roster,c));
         HANDLE worker=CreateThread(NULL,0,returned_foreign,NULL,0,NULL);assert(worker);
         assert(WaitForSingleObject(worker,5000)==WAIT_OBJECT_0);CloseHandle(worker);
@@ -294,6 +294,7 @@ static void image_globals_copy(void) {
     ended(FALSE);
     puts("PASS named SplitImageGlobalsReadable FILE_MAP_COPY capture before/after private write; guard/noaccess/allocation refusal");
 }
+static void parking_cases(void);
 static void exterior_residency(void) {
     HANDLE image_map=CreateFileMappingW(INVALID_HANDLE_VALUE,NULL,PAGE_READWRITE,0,0x409000,NULL);assert(image_map);
     fixture_image_seed=MapViewOfFile(image_map,FILE_MAP_WRITE,0,0,0x409000);assert(fixture_image_seed);
@@ -303,6 +304,7 @@ static void exterior_residency(void) {
     assert(VirtualQuery(fixture_heap,&mapping,sizeof(mapping))==sizeof(mapping));
     assert(mapping.Type==MEM_PRIVATE && mapping.State==MEM_COMMIT && mapping.Protect==PAGE_READWRITE);
     puts("CHECK named SplitResidencyFixture heap=private/readwrite image=FILE_MAP_COPY");
+    parking_cases();
     image_globals_copy();
     returned_residency();
     for(unsigned c=0;c<4u;++c) {
@@ -359,6 +361,52 @@ static void exterior_residency(void) {
     fixture_image=NULL;
     assert(UnmapViewOfFile(fixture_image_seed) && CloseHandle(image_map));fixture_image_seed=NULL;
     assert(VirtualFree(fixture_heap,0,MEM_RELEASE));fixture_heap=NULL;state();
+}
+static void __attribute__((naked)) fake_pause(void) {__asm__("incb 0x23(%eax); ret");}
+static void __attribute__((naked)) fake_resume(void) {__asm__("decb 0x23(%esi); ret");}
+static void __attribute__((thiscall)) fake_lead(void *group) {
+    uint8_t *g=group;assert(!FU32(g,0xd0));FU32(g,0xd0)=1;
+    for(unsigned i=1;i<4;++i)((uint8_t *)FPTR(g,0x90+i*12))[0x2b]+=2;
+}
+static void __attribute__((thiscall)) fake_full(void *group) {
+    uint8_t *g=group;FU32(g,0xd0)=0;
+    for(unsigned i=1;i<FU32(g,0xcc);++i)((uint8_t *)FPTR(g,0x90+i*12))[0x2b]-=2;
+}
+static void parking_cases(void) {
+    residency_fixture(2);exempt_count=0;exempt_group=NULL;FU32(fixture_group,0xd0)=0;
+    outside_mask=0;away_mask=4;lead_hook.trampoline=(void *)fake_lead;
+    SudekiMpLanStorySplitNodePause=(void *)fake_pause;SudekiMpLanStorySplitNodeResume=(void *)fake_resume;
+    fixture_actor_bytes[2][0x2b]=3;lead_only(fixture_group);
+    assert(parked[2].actor==fixture_actor_bytes[2] && parked[2].added==2 && parked[2].refs_before==3);
+    assert(fixture_actor_bytes[2][0x2b]==5 && !exempt_count);
+    active=FALSE;assert(!SudekiMpLanStorySplitUninstall());active=TRUE;
+    uint8_t changed_group[0xd4];memcpy(changed_group,fixture_group,sizeof(changed_group));
+    for(unsigned guard=0;guard<6;++guard) {
+        settled_inside=guard!=0;void *a=parked[2].actor,*g=parked[2].group;
+        if(guard==1)parked[2].actor=fixture_actor_bytes[1];
+        if(guard==2)parked[2].group=changed_group;
+        if(guard==3)FU32(fixture_group,0xd0)=2;
+        if(guard==4)++native_thread;
+        if(guard==5)fixture_actor_bytes[2][0x2b]=1;
+        assert(!SudekiMpLanStorySplitUnparkMember(2));
+        settled_inside=TRUE;parked[2].actor=a;parked[2].group=g;FU32(fixture_group,0xd0)=1;
+        native_thread=GetCurrentThreadId();fixture_actor_bytes[2][0x2b]=5;
+    }
+    assert(SudekiMpLanStorySplitUnparkMember(2) && fixture_actor_bytes[2][0x2b]==3 && !parked[2].actor);
+    assert(SudekiMpLanStorySplitParkMember(2) && fixture_actor_bytes[2][0x2b]==5 && !exempt_count);
+    assert(SudekiMpLanStorySplitParkMember(2) && fixture_actor_bytes[2][0x2b]==5);
+    full_hook.trampoline=(void *)fake_full;uint8_t foreign_group[0xd4]={0};
+    full_party(foreign_group);assert(parked[2].actor);
+    full_party(fixture_group);assert(!parked[2].actor && fixture_actor_bytes[2][0x2b]==3);
+    residency_fixture(2);exempt_count=0;exempt_group=NULL;FU32(fixture_group,0xd0)=0;
+    outside_mask=0;away_mask=4;lead_only(fixture_group);
+    assert(parked[2].actor && parking_held());
+    ended(TRUE);assert(!parked[2].actor && !parking_held());
+    state();outside_mask=0;away_mask=4;assert(begin_temp("LNBr_Kamo_shop",3));
+    SudekiMpLanStoryTempExteriorEntry e={0};strcpy(e.destination,"LNBr_Kamo_shop");assert(keep_exterior(NULL,&e));
+    state();outside_mask=away_mask=0;begin_no_members_reported=FALSE;unsigned count=diagnostic_count;
+    for(unsigned i=0;i<10;++i)assert(!begin_temp("LNBr_Kamo_shop",3));
+    assert(diagnostic_count==count+1);
 }
 int main(void) {
     kamo_lifecycle();

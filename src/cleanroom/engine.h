@@ -273,4 +273,6 @@ BOOL SudekiMpCleanroomEngineTrainingSkillAllocationValidForTesting(
 );
 #endif
 
+void SudekiMpCleanroomEngineSetTPtrAudit(BOOL enabled);
+BOOL SudekiMpCleanroomEngineTPtrAuditEnabled(void);
 #endif

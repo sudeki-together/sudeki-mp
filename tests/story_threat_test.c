@@ -194,7 +194,11 @@ static void predicates_and_pick_tests(void) {
     r=(SudekiMpStoryThreatRecord){.serial=1,.updated_at=1000,.threat={.01f,.2f,10,20}};
     unsigned level=STORY_TARGET_TIER1,type=1,mode=0,eligible=15,current=0;int coop=1,excluded=0;
 #define PICK() SudekiMpStoryThreatPick(&c,level,coop,type,excluded,mode,&r,1000,current,eligible,k,d)
-    assert(PICK()==1);r.threat[0]=.17f;assert(PICK()==0);r.threat[1]=.3f;assert(PICK()==1);
+    assert(PICK()==1);
+    /* Review 3: below-floor current is within the sticky margin of best. */
+    r.threat[0]=.045f;r.threat[1]=.055f;assert(PICK()==1);
+    r.threat[0]=.05f;assert(PICK()==1);
+    r.threat[1]=.2f;r.threat[0]=.17f;assert(PICK()==0);r.threat[1]=.3f;assert(PICK()==1);
     r.threat[0]=r.threat[1]=.05f;assert(PICK()==4);r.threat[0]=.2f;r.threat[1]=0;
 #define PICK_REFUSES(change,restore) do {change;assert(PICK()==4);restore;assert(PICK()==0);} while(0)
     PICK_REFUSES(coop=0,coop=1);PICK_REFUSES(type=0,type=1);PICK_REFUSES(type=4,type=1);PICK_REFUSES(type=6,type=1);
@@ -379,6 +383,9 @@ static void push_and_decide_tests(void) {
 #define DECIDE() SudekiMpStoryThreatDecide(&c,level,coop,type,excluded,mode,0,record,pushes,complete,now,4,eligible,k,d,lead)
     assert(DECIDE().rule==STORY_RULE_ALERT && DECIDE().seat==1);
     r.responding[0].active=0;assert(DECIDE().rule==STORY_RULE_PUSH);
+    /* Review 11: tier 1.5 does not admit an otherwise eligible active push. */
+    level=STORY_TARGET_TIER15;assert(DECIDE().rule==STORY_RULE_THREAT);
+    level=STORY_TARGET_TIER2;assert(DECIDE().rule==STORY_RULE_PUSH);
     pushes[0][0].serial=8;assert(DECIDE().rule==STORY_RULE_THREAT);pushes[0][0].serial=7;
     complete=0;assert(DECIDE().rule==STORY_RULE_THREAT);
     r.responding[0].active=1;assert(DECIDE().rule==STORY_RULE_THREAT);complete=1;
@@ -430,8 +437,80 @@ static void clock_wrap_tests(void) {
     }
 }
 
+static void review_commit_and_group_tests(void) {
+    /* Reviews 8/10: isolate unknown groups and the zero-count contract. */
+    assert(!SudekiMpStoryThreatSameGroup(0,0));
+    assert(!SudekiMpStoryThreatSameGroup(0,7));
+    assert(SudekiMpStoryThreatSameGroup(7,7));
+    assert(!SudekiMpStoryThreatSameGroup(7,8));
+    SudekiMpStoryThreatConfig c;SudekiMpStoryThreatDefaults(&c);
+    SudekiMpStoryThreatRecord a={.serial=10},r={.serial=20},before_a=a,before_r=r;
+    uint32_t serials[1]={20};SudekiMpStoryThreatRecord *records[1]={&r};
+    assert(!SudekiMpStoryThreatAlertCommit(&c,0,&a,0,serials,0,records,1000,1));
+    assert(!memcmp(&a,&before_a,sizeof(a)) && !memcmp(&r,&before_r,sizeof(r)));
+    assert(SudekiMpStoryThreatAlertCommit(&c,0,&a,0,serials,1,records,1000,1));
+}
+static void reason_precedence_tests(void) {
+    /* Review 9: every pair of simultaneous reasons, not just isolated reasons. */
+    SudekiMpStoryThreatConfig c;SudekiMpStoryThreatDefaults(&c);
+    const unsigned alert_order[]={STORY_END_LEVEL,STORY_END_DOWN,STORY_END_STOP,
+        STORY_END_CLOSE,STORY_END_LEFT,STORY_END_EXPIRED};
+    for(unsigned first=0;first<6;++first) for(unsigned second=first+1;second<6;++second) {
+        unsigned bits=(1u<<first)|(1u<<second),level=(bits&1)?STORY_TARGET_TIER1:STORY_TARGET_TIER15;
+        unsigned kind=(bits&2)?STORY_SEAT_DOWN:STORY_SEAT_HOST;
+        SudekiMpStoryThreatRecord a,r[3];SudekiMpStoryThreatResponderView v[3];
+        alert_fixture(&c,&a,r,v,10000);
+        if(bits&4) a.alerting[0].last_fire=r[0].responding[0].last_fire=6000;
+        if(bits&32) a.alerting[0].until=r[0].responding[0].until=9999;
+        int close=!!(bits&8),listed=(bits&16)?STORY_LIST_FALSE:STORY_LIST_UNKNOWN;
+        assert(SudekiMpStoryThreatResponderFade(&c,level,1,0,&r[0],close,listed,kind,0,10000)==alert_order[first]);
+        /* AlertFade computes close only over remaining responders, so close
+         * and all-left cannot coexist there. The orphan/shared rule covers it. */
+        if(first==3 && second==4) continue;
+        for(unsigned i=0;i<3;++i) {v[i].close=close;v[i].listed=listed;}
+        uint32_t released[3];unsigned n;
+        assert(SudekiMpStoryThreatAlertFade(&c,level,1,0,&a,v,3,kind,0,10000,released,&n)==alert_order[first]);
+    }
+    const unsigned push_order[]={STORY_END_LEVEL,STORY_END_DOWN,STORY_END_INVALID,STORY_END_ENGAGED,STORY_END_EXPIRED};
+    for(unsigned first=0;first<5;++first) for(unsigned second=first+1;second<5;++second) {
+        unsigned bits=(1u<<first)|(1u<<second),level=(bits&1)?STORY_TARGET_TIER15:STORY_TARGET_TIER2;
+        unsigned kind=(bits&2)?STORY_SEAT_DOWN:STORY_SEAT_HOST;
+        SudekiMpStoryThreatPushState p={0};SudekiMpStoryThreatPushStart(&c,0,&p,7,10000,1);
+        if(bits&16) p.until=9999;
+        assert(SudekiMpStoryThreatPushEnd(&c,level,1,0,&p,kind,1,!!(bits&8),!(bits&4),STORY_LIST_UNKNOWN,10000)==push_order[first]);
+        assert(!p.active);
+    }
+}
+static void deadline_straddle_tests(void) {
+    /* Review 2: now and deadline lie on opposite sides of each boundary. */
+    SudekiMpStoryThreatConfig c;SudekiMpStoryThreatDefaults(&c);
+    const uint32_t boundary[]={0,0x80000000u};
+    for(unsigned b=0;b<2;++b) for(unsigned reverse=0;reverse<2;++reverse) {
+        uint32_t before=boundary[b]-2,after=boundary[b]+2;
+        uint32_t now=reverse?after:before,until=reverse?before:after;
+        SudekiMpStoryThreatPushState p={0};
+        SudekiMpStoryThreatPushStart(&c,0,&p,7,until-8000,1);
+        assert(SudekiMpStoryThreatPushEnd(&c,STORY_TARGET_TIER2,1,0,&p,STORY_SEAT_HOST,1,0,1,STORY_LIST_UNKNOWN,now)==
+            (reverse?STORY_END_EXPIRED:STORY_END_NONE));
+        if(!reverse) assert(SudekiMpStoryThreatPushEnd(&c,STORY_TARGET_TIER2,1,0,&p,STORY_SEAT_HOST,1,0,1,STORY_LIST_UNKNOWN,until)==STORY_END_EXPIRED);
+        p=(SudekiMpStoryThreatPushState){.idle_active=1,.idle_since=now-5000,.cooldown_active=1,.cooldown_until=until};
+        assert(SudekiMpStoryThreatPushEvaluate(&c,STORY_TARGET_TIER2,1,0,&p,STORY_SEAT_HOST,1,now)==(int)reverse);
+        if(!reverse) assert(SudekiMpStoryThreatPushEvaluate(&c,STORY_TARGET_TIER2,1,0,&p,STORY_SEAT_HOST,1,until));
+        SudekiMpStoryThreatRecord a={.serial=10,.updated_at=now,.sniper={.2f}};
+        a.alerting[0].cooldown_active=1;a.alerting[0].cooldown_until=until;
+        assert(SudekiMpStoryThreatAlertRaise(&c,STORY_TARGET_TIER15,1,1,0,0,&a,0,STORY_SEAT_HOST,1,0,now)==(int)reverse);
+        if(!reverse) assert(SudekiMpStoryThreatAlertRaise(&c,STORY_TARGET_TIER15,1,1,0,0,&a,0,STORY_SEAT_HOST,1,0,until));
+        SudekiMpStoryThreatRecord r[3];SudekiMpStoryThreatResponderView v[3];
+        alert_fixture(&c,&a,r,v,until-6000);uint32_t released[3];unsigned n;
+        assert(SudekiMpStoryThreatAlertFade(&c,STORY_TARGET_TIER15,1,0,&a,v,3,STORY_SEAT_HOST,1,now,released,&n)==
+            (reverse?STORY_END_EXPIRED:STORY_END_NONE));
+        if(!reverse) assert(SudekiMpStoryThreatAlertFade(&c,STORY_TARGET_TIER15,1,0,&a,v,3,STORY_SEAT_HOST,1,until,released,&n)==STORY_END_EXPIRED);
+    }
+}
+
 int main(void) {
     seats();config_tests();caps();lead_tests();defend_tests();memory_tests();predicates_and_pick_tests();
     alert_selection_tests();alert_lifetime_tests();push_and_decide_tests();clock_wrap_tests();
+    review_commit_and_group_tests();reason_precedence_tests();deadline_straddle_tests();
     puts("story tier0/threat/alert/push/Defend policy tests passed");return 0;
 }

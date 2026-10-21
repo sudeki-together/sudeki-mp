@@ -37,7 +37,7 @@ static BOOL exterior_bound,exterior_ready,exterior_steering;
 static BOOL gap_direction_ok,gap_transport_ok;
 static unsigned gap_direction_calls,gap_send_calls;
 static SudekiMpLanStoryMovement gap_sent;
-static unsigned eligibility_calls,eligible_mask;
+static unsigned eligibility_calls,eligible_mask,eligible_away;
 static BOOL eligible_ready;
 static SudekiMpLanStoryScene camera_remote,camera_native;
 static SudekiMpLanStoryControlState camera_control;
@@ -106,8 +106,8 @@ BOOL SudekiMpLanStoryMainMenuVisible(void) {return camera_main_menu;}
 BOOL SudekiMpLanStoryWorldRecruiting(void) {return camera_world_recruiting;}
 BOOL SudekiMpLanStoryRemoteInteriorMemberParked(unsigned character) {(void)character;return FALSE;}
 BOOL SudekiMpLanStoryClientRecruiting(void) {return camera_client_recruiting;}
-void SudekiMpLanStorySplitSetEligibility(BOOL ready,uint8_t mask) {
-    ++eligibility_calls;eligible_ready=ready;eligible_mask=mask;
+void SudekiMpLanStorySplitSetEligibility(BOOL ready,uint8_t mask,uint8_t away) {
+    ++eligibility_calls;eligible_ready=ready;eligible_mask=mask;eligible_away=away;
 }
 BOOL SudekiMpLanStoryLocalControlDirection(void *controller,
     const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryNativeRoster *r,
@@ -753,6 +753,9 @@ static void away_targeting_admission(void) {
     assert(SudekiMpLanStoryRuntimeCompanionSeatExact(2));
     story_presence.ownership.assignment.available|=1;
     assert(SudekiMpLanStoryRuntimeCompanionSeatExact(0));
+    /* Review 12: the menu gate also precedes the unclaimed-seat return. */
+    menu_captures=TRUE;assert(!SudekiMpLanStoryRuntimeCompanionSeatExact(0));
+    menu_captures=FALSE;assert(SudekiMpLanStoryRuntimeCompanionSeatExact(0));
     HANDLE worker=CreateThread(NULL,0,away_admission_wrong_thread,&key,0,NULL);assert(worker);
     WaitForSingleObject(worker,INFINITE);CloseHandle(worker);
     story_presence.ownership.assignment.available&=~1u;
@@ -821,7 +824,30 @@ static void away_targeting_admission(void) {
 #undef AWAY_REFUSES
     puts("PASS away combat admission: owned AI after drain; current connection, host profile, reservation and thread required");
 }
+static void away_masks(void) {
+    fixture(15,3);acquire(1,2,TRUE);story_policy_initialized=TRUE;
+    story_presence.ownership.assignment.character[1]=2;story_presence.ownership.away=2;
+    assert(away_retain_mask(&test_roster)==4);
+    split_attempted=TRUE;SudekiMpLanStoryScene scene={.epoch=9,.revision=1,.phase=SUDEKIMP_LAN_STORY_READY,.available_mask=15,.leader_seat=3};strcpy(scene.world,"world");
+    test_roster.revision=1;host_control[1].fence=(SudekiMpLanStoryControlFence){9,1,6,1,1,2};
+    refresh_split_eligibility(&test_witness,&scene,&test_roster);assert(eligible_away==4 && !eligible_mask);
+    host_control[1].draining=TRUE;assert(away_retain_mask(&test_roster)==4);
+    host_control[1].native_key.token=0;assert(away_retain_mask(&test_roster)==4);
+    test_roster.leader_character=2;assert(!away_retain_mask(&test_roster));test_roster.leader_character=3;
+    test_peers[1].transport_confirmed=FALSE;assert(!away_retain_mask(&test_roster));test_peers[1].transport_confirmed=TRUE;
+    test_peers[1].phase=SUDEKIMP_LAN_PARTY_DRAINING;assert(!away_retain_mask(&test_roster));test_peers[1].phase=SUDEKIMP_LAN_PARTY_OBSERVING;
+    test_roster.available_mask=8;assert(!away_retain_mask(&test_roster));test_roster.available_mask=15;
+    assigned_character[1]=0;assert(!away_retain_mask(&test_roster));assigned_character[1]=2;
+    story_presence.ownership.phase=SUDEKIMP_PARTY_SWAP_RESERVED;story_presence.ownership.player=1;
+    assert(!away_retain_mask(&test_roster));story_presence.ownership.phase=SUDEKIMP_PARTY_SWAP_IDLE;
+    story_presence.ownership.away=0;assert(!away_retain_mask(&test_roster));
+    /* The completed drain clears the old seat before Return acquires it. */
+    memset(&host_control[1],0,sizeof(host_control[1]));
+    acquire(1,2,TRUE);host_control[1].fence=(SudekiMpLanStoryControlFence){9,1,6,1,1,2};
+    refresh_split_eligibility(&test_witness,&scene,&test_roster);assert(eligible_mask==4 && !eligible_away);
+}
 int main(void) {
+    away_masks();
     prepare_and_acknowledgement();refused_leases();multiple_clients();ai_reservation_without_input();
     settled_eligibility_prepass();exterior_shop_permissions();client_revision_continuity();
     camera_continuity_clock();camera_continuity_refusals();
@@ -829,3 +855,19 @@ int main(void) {
     puts("PASS actual runtime split/activity mask policy; native AI suppression and live TEMP remain separate evidence");
     return 0;
 }
+
+BOOL SudekiMpLanStorySplitMemberParked(unsigned c) {(void)c;return FALSE;}
+BOOL SudekiMpLanStorySplitParkMember(unsigned c) {(void)c;return TRUE;}
+BOOL SudekiMpLanStorySplitUnparkMember(unsigned c) {(void)c;return TRUE;}
+void SudekiMpLanStoryRemoteInteriorAwayDrained(const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanStoryScene *s,unsigned c) {(void)r;(void)s;(void)c;}
+int SudekiMpLanStoryRemoteInteriorAwayReturn(const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanStoryScene *s,unsigned c,uint32_t now) {(void)r;(void)s;(void)c;(void)now;return 1;}
+
+BOOL SudekiMpLanStoryCastSuperseded(void) {return FALSE;}
+
+void SudekiMpLanStoryCastRequestStop(void) {}
+BOOL SudekiMpLanStoryCastRetains(void) {return FALSE;}
+BOOL SudekiMpLanStoryCastService(const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryNativeRoster *r) {(void)w;(void)r;return TRUE;}
+BOOL SudekiMpLanStoryCastUninstall(void) {return TRUE;}
+void SudekiMpLanStoryDoorCameraUninstall(void) {}
+
+void SudekiMpLanStoryRemoteInteriorCancelAwayReturn(unsigned c) {(void)c;}

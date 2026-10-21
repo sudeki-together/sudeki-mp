@@ -20,4 +20,13 @@ BOOL SudekiMpLanArenaStartupMovieSkipImageMatches(HMODULE game_module);
 /* Safe exact-name policy query. Invalid or unreadable pointers are rejected. */
 BOOL SudekiMpLanArenaStartupMovieShouldSkip(const char *movie_name);
 
+/* One owner for MoviePlay. Saved-story may observe native calls and invoke the
+ * immutable trampoline; attaching alone does not enable logo skipping. Remove
+ * refuses while a native movie/callback is on the stack. */
+typedef BOOL (*SudekiMpMovieBegin)(const char *name);
+typedef void (*SudekiMpMovieEnd)(void);
+BOOL SudekiMpLanArenaMovieObserve(HMODULE image,SudekiMpMovieBegin begin,SudekiMpMovieEnd end);
+BOOL SudekiMpLanArenaMovieUnobserve(void);
+BOOL SudekiMpLanArenaMoviePlayInstalled(const char *name);
+
 #endif

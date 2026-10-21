@@ -61,9 +61,16 @@ BOOL SudekiMpLanPartyEffectLifetimeRetains(void) { return effects_live; }
 BOOL SudekiMpLanPartyProjectileLifetimeRetains(void) { return missiles_live; }
 void SudekiMpLogWrite(const char *line) { (void)line; }
 static int ix(void *a) { for(unsigned i=0;i<4;++i) if(a==actors[i]) return (int)i; return -1; }
+static BOOL epoch_proof;static uint32_t current_epoch;
+BOOL SudekiMpLanStoryObserverPublished(SudekiMpLanStoryScene *out) {
+    if(!epoch_proof)return FALSE;
+    *out=(SudekiMpLanStoryScene){.epoch=current_epoch,.revision=2,.phase=SUDEKIMP_LAN_STORY_READY};return TRUE;
+}
+static BOOL identity_unknown;
+BOOL SudekiMpLanStoryObserverIdentityUnknown(void) {return identity_unknown;}
 BOOL SudekiMpLanStoryObserverNativeRosterExact(const SudekiMpLanStoryNativeRoster *r) {
     ++roster_checks;
-    return identity && r==&owners;
+    return identity && (epoch_proof?r->epoch==current_epoch:r==&owners);
 }
 BOOL SudekiMpControlSeparationUpdateDispatchWitnessStillExact(const SudekiMpControlUpdateDispatchWitness *w) {
     return w && w->dispatch_serial==5;
@@ -161,7 +168,7 @@ static void reset(void) {
     memset(front,0,sizeof(front)); memset(quick,0,sizeof(quick)); front[0x8c]=1;
     memset(native_active,0,sizeof(native_active));
     identity=lease_exact=known=lineage_idle=healthy=accept_skill=hold_active=TRUE;
-    spirit_active=lighting_tail=FALSE; bound=initialized=TRUE; stopping=fault=initializing=FALSE;
+    spirit_active=lighting_tail=FALSE; bound=initialized=TRUE; stopping=fault=initializing=retire_superseded=FALSE;
     submitting=-1; submitting_spirit=FALSE; lifetime=9; native_thread=GetCurrentThreadId();
     owners.available_mask=12; owners.leader_character=3;
     for(unsigned i=2;i<4;++i) {
@@ -268,6 +275,24 @@ static void cast_camera_publication(void) {
 int main(void) {
     image=VirtualAlloc(NULL,0x409000,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE); assert(image);
     cast_binding_lifecycle();
+    HMODULE epoch_image=image;reset();epoch_proof=TRUE;owners.epoch=5;current_epoch=6;
+    SudekiMpLanStoryNativeRoster fresh=owners;fresh.epoch=6;
+    SudekiMpControlUpdateDispatchWitness ew={.dispatch_serial=5,.service_post_original_exact=TRUE};
+    identity_unknown=TRUE;
+    SudekiMpLanStoryNativeRoster wrong=fresh;wrong.actors[2]=(void *)1;
+    assert(SudekiMpLanStoryCastService(&ew,&wrong) && !fault && owners.epoch==5 && bound);
+    identity_unknown=FALSE;
+    assert(SudekiMpLanStoryCastSuperseded());
+    fresh.actors[2]=(void *)1;assert(!rebase_owners(&fresh));fresh=owners;fresh.epoch=6;
+    effects_live=TRUE;unsigned proved=roster_checks;
+    assert(SudekiMpLanStoryCastService(&ew,&fresh) && !fault && owners.epoch==6 && bound && retire_superseded);
+    assert(roster_checks>proved && !SudekiMpLanStoryCastSuperseded());
+    assert(!SudekiMpLanStoryCastUninstall() && bound); /* retained tail */
+    effects_live=FALSE;assert(SudekiMpLanStoryCastService(&ew,&fresh) && !bound && image==epoch_image);
+    assert(SudekiMpLanStoryCastTryBind(&ew,&fresh) && bound && owners.epoch==6);
+    caster[2].spirit_started=TRUE;assert(!SudekiMpLanStoryCastUninstall() && bound);
+    caster[2].spirit_started=FALSE;assert(SudekiMpLanStoryCastUninstall() && !bound);
+    image=epoch_image;epoch_proof=FALSE;
     cast_camera_publication();
     cast_audio_publication();
     SudekiMpControlUpdateDispatchWitness w={.dispatch_serial=5,.service_post_original_exact=TRUE};
@@ -467,3 +492,8 @@ int main(void) {
     puts("story cast synthetic sparse admission/retained task/drain tests passed (no gameplay)");
     return 0;
 }
+
+BOOL SudekiMpCheckLoadedExecutable(HMODULE m) {return m!=NULL;}
+BOOL SudekiMpLanStoryRealtimeExact(HMODULE m) {return m!=NULL;}
+
+int SudekiMpRouteSpiritInstanceRenderCamera(void *m,const char *n,unsigned *k) {(void)m;(void)n;(void)k;assert(!"unexpected camera selection");return 0;}

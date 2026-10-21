@@ -6,7 +6,12 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <windows.h>
+static DWORD fixture_tick=1000;
+static DWORD fixture_clock(void) {return fixture_tick;}
+#define GetTickCount fixture_clock
 #include "../src/hooks/lan_story_observer.c"
+#undef GetTickCount
 
 static char last_log[4096];
 static unsigned log_count;
@@ -103,8 +108,29 @@ static void unknown_is_not_completion(void) {
     assert(strstr(last_log,"captured=0 finite=0") && strstr(last_log,"completion=unobserved"));
     foreign_thread=FALSE;
 }
+static void away_vanilla_context(void) {
+    fixture();installed=TRUE;observed.phase=SUDEKIMP_LAN_STORY_LOADING;
+    vanilla_transition_pending=TRUE;vanilla_transition=fixture_tick;
+    assert(SudekiMpLanStoryObserverIdentityUnknown()); /* same tick, including zero */
+    fixture_tick=vanilla_transition=0;assert(SudekiMpLanStoryObserverIdentityUnknown());
+    strcpy(observed.world,"world");observed.temporary[0]=0; /* EXIT: general world-loading witness is also true */
+    fixture_tick=20000;assert(!SudekiMpLanStoryObserverIdentityUnknown());
+    fixture_tick=1000;vanilla_transition=1000;observed.phase=SUDEKIMP_LAN_STORY_READY;
+    assert(!SudekiMpLanStoryObserverIdentityUnknown());
+    observed.epoch=7;observed.revision=3;observed.available_mask=15;observed.leader_seat=3;
+    strcpy(observed.temporary,"house");observed.inside_mask=0;
+    publish_ready_membership(15,3);assert(observed.inside_mask==8 && !vanilla_transition_pending);
+    assert(!SudekiMpLanStoryObserverSetInsideMembership(6,3,12));
+    assert(!SudekiMpLanStoryObserverSetInsideMembership(7,2,12));
+    assert(!SudekiMpLanStoryObserverSetInsideMembership(7,3,4));
+    assert(observed.inside_mask==8 && observed.revision==3);
+    assert(SudekiMpLanStoryObserverSetInsideMembership(7,3,12));
+    assert(observed.inside_mask==12 && published.inside_mask==12 && observed.revision==4);
+    installed=FALSE;vanilla_transition=0;vanilla_transition_pending=FALSE;
+}
 int main(void) {
     base=VirtualAlloc(NULL,0x410000u,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE); assert(base);
+    away_vanilla_context();
     copied_sector_and_read_only(); entry_after_exit_before(); unknown_is_not_completion();
     assert(VirtualFree(base,0,MEM_RELEASE)); base=NULL;
     puts("StoryTemporaryContextTest: PASS (synthetic diagnostics only)"); return 0;

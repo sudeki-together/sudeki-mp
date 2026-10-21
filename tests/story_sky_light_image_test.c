@@ -5,8 +5,9 @@
 #include <stdlib.h>
 #include "engine/cast_light_abi.h"
 #include "../src/hooks/lan_story_sky.c"
-void SudekiMpLogWrite(const char *message) { (void)message; }
-void SudekiMpLogFormat(const char *format,...) { (void)format; }
+static unsigned reset_logs,override_logs;
+void SudekiMpLogWrite(const char *message) { if(strstr(message,"follow_reset"))++reset_logs; }
+void SudekiMpLogFormat(const char *format,...) { if(strstr(format,"local_override"))++override_logs; }
 BOOL SudekiMpLogResearchEnabled(void) { return FALSE; }
 BOOL SudekiMpLanStoryWithResourceName(const char *name,unsigned kind,
     void (*use)(void *,void *),void *context) {
@@ -30,6 +31,20 @@ static uint8_t *map_image(const wchar_t *path) {
             s->SizeOfRawData<=nt->OptionalHeader.SizeOfImage-s->VirtualAddress);
         memcpy(base+s->VirtualAddress,raw+s->PointerToRawData,s->SizeOfRawData);
     }
+    /* Stage 1.1 castle audit: exact supported-file bytes, before relocation.
+     * Last range includes the complete 5BF4E0 body and alignment padding. */
+    static const struct {uint32_t rva,size,hash;} tptr_contracts[]={
+        {0x1b30u,31u,0x20eb0622u},
+        {0x1b50u,167u,0xc1ecd0f4u},
+        {0x15e0u,54u,0xbd109b18u},
+        {0x1750u,85u,0xb6987b3au},
+        {0x1bf4e0u,160u,0x5303731cu},
+    };
+    for(unsigned i=0;i<sizeof(tptr_contracts)/sizeof(*tptr_contracts);++i) {
+        uint32_t h=2166136261u;
+        for(unsigned j=0;j<tptr_contracts[i].size;++j) h=(h^base[tptr_contracts[i].rva+j])*16777619u;
+        assert(h==tptr_contracts[i].hash);
+    }
     uintptr_t delta=(uintptr_t)base-nt->OptionalHeader.ImageBase;
     IMAGE_DATA_DIRECTORY reloc=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
     unsigned offset=0;
@@ -52,6 +67,7 @@ static uint8_t *map_image(const wchar_t *path) {
     free(raw); return base;
 }
 
+static void __attribute__((thiscall)) inert_dome(void *s,void *r) {(void)s;(void)r;}
 int main(int argc,char **argv) {
     wchar_t path[32768];
     assert(argc==2 && MultiByteToWideChar(CP_UTF8,0,argv[1],-1,path,32768));
@@ -118,6 +134,31 @@ int main(int argc,char **argv) {
     assert(SudekiMpLanStorySkyUninstall());
     assert(!light_lease.manager && bits(*(float *)(manager+0x30))==bits(.8f));
     assert(!memcmp(manager+0x34,original,12) && !memcmp(manager+0x40,original,12));
+    memset(applied,7,sizeof(applied));dome_applied=light_applied=7;blend.active=TRUE;
+    SudekiMpLanStorySkySetClient(TRUE);
+    assert(SudekiMpLanStorySkyInstall((HMODULE)image));
+    assert(reset_logs==1 && !dome_applied && !light_applied && !blend.active);
+    for(unsigned i=0;i<SUDEKIMP_STORY_SKY_KINDS;++i)assert(!applied[i]);
+    uint32_t args[5]={0};
+    for(unsigned kind=0;kind<SUDEKIMP_STORY_SKY_KINDS;++kind) {
+        for(unsigned i=0;i<SUDEKIMP_STORY_SKY_KINDS;++i)applied[i]=9;
+        light_applied=99;record(kind,args,2);
+        for(unsigned i=0;i<SUDEKIMP_STORY_SKY_KINDS;++i)
+            assert(applied[i]==((kind<3?i<3:i==kind)?0u:9u));
+        assert(light_applied==99);
+    }
+    void *dome_original=dome_hook.trampoline;dome_hook.trampoline=(void *)inert_dome;
+    dome_applied=9;dome_hook_fn(scene_object,NULL);assert(!dome_applied);
+    dome_applied=9;replaying=TRUE;dome_hook_fn(scene_object,NULL);assert(dome_applied==9);replaying=FALSE;
+    dome_hook_fn(manager,NULL);assert(dome_applied==9);
+    client_follow=FALSE;dome_hook_fn(scene_object,NULL);assert(dome_applied==9);client_follow=TRUE;
+    dome_hook.trampoline=dome_original;
+    unsigned logged=override_logs;applied[0]=9;replaying=TRUE;record(0,args,2);
+    assert(applied[0]==9 && override_logs==logged);replaying=FALSE;
+    ++native_thread;record(0,args,2);--native_thread;assert(applied[0]==9 && override_logs==logged);
+    client_follow=FALSE;record(0,args,2);assert(applied[0]==9 && override_logs==logged);
+    client_follow=TRUE;for(unsigned i=0;i<100;++i)record(0,args,2);assert(follow_logs==64);
+    assert(SudekiMpLanStorySkyUninstall());SudekiMpLanStorySkySetClient(FALSE);
     /* Host story sky capture and private casting must coexist. No native
      * constructor, task or lighting tick runs: this proves exact ABI guards,
      * both hook owners and restoration using an inert scheduler owner. */

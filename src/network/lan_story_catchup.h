@@ -14,9 +14,9 @@ typedef struct SudekiMpLanStoryCatchup {
     SudekiMpLanStoryFrame party;
     SudekiMpLanStoryWorldFrame world;
 } SudekiMpLanStoryCatchup;
-#define SUDEKIMP_STORY_CATCHUP_MAX_SIZE 11000u
+#define SUDEKIMP_STORY_CATCHUP_MAX_SIZE 20480u
 #define SUDEKIMP_STORY_CATCHUP_FRAGMENT_SIZE 1024u
-#define SUDEKIMP_STORY_CATCHUP_MAX_FRAGMENTS 11u
+#define SUDEKIMP_STORY_CATCHUP_MAX_FRAGMENTS 20u
 #define SUDEKIMP_STORY_CATCHUP_HEADER_SIZE 16u
 BOOL SudekiMpLanStoryCatchupValid(const SudekiMpLanStoryCatchup *snapshot);
 BOOL SudekiMpLanStoryCatchupMatches(const SudekiMpLanStoryCatchup *snapshot,

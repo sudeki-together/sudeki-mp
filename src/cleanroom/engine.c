@@ -1,6 +1,8 @@
 #include "cleanroom/engine.h"
 
 #include "engine/log.h"
+#include "engine/tptr_audit.h"
+#include <stdio.h>
 #include "engine/weapon_activation_abi.h"
 #include "hooks/call_hook.h"
 
@@ -1540,6 +1542,40 @@ static void release_retained_reference(uint32_t **reference_slot) {
     }
 }
 
+static BOOL tptr_audit_enabled;
+static volatile LONG tptr_audit_logged;
+static SudekiMpTPtrCapture tptr_audit_capture;
+BOOL SudekiMpCleanroomEngineTPtrAuditEnabled(void) {return tptr_audit_enabled;}
+void SudekiMpCleanroomEngineSetTPtrAudit(BOOL enabled) {
+    tptr_audit_enabled=enabled; InterlockedExchange(&tptr_audit_logged,0);
+}
+static int tptr_read(void *unused,uintptr_t source,void *out,size_t size) {
+    (void)unused;
+    if(!readable_memory((void *)source,size)) return 0;
+    memcpy(out,(void *)source,size); return 1;
+}
+static void tptr_audit(void *entity,void *own,const char *phase) {
+    if(!tptr_audit_enabled || InterlockedCompareExchange(&tptr_audit_logged,0,0) ||
+        !readable_memory(entity,8)) return;
+    NT_TIB *tib=(NT_TIB *)NtCurrentTeb();
+    SudekiMpTPtrWalk walk=SudekiMpTPtrAuditWalk((uintptr_t)entity,
+        (uintptr_t)*(void **)((uint8_t *)entity+4),(uintptr_t)own,
+        (uintptr_t)tib->StackLimit,(uintptr_t)tib->StackBase,tptr_read,NULL);
+    if(!walk.flags || InterlockedCompareExchange(&tptr_audit_logged,1,0)) return;
+    /* Capture all bytes before any logger frame can reuse a dead node's
+     * stack. Only the CAS winner writes this static storage. Our own frame
+     * and readable_memory's VirtualQuery can still disturb nodes near SP. */
+    SudekiMpTPtrAuditCapture(&walk,&tptr_audit_capture,tptr_read,NULL);
+    SudekiMpLogFormat("story_tptr event=suspect phase=%s thread=%lu object=%p own=%p flags=%u nodes=%u current_stack_only=1\r\n",
+        phase,(unsigned long)GetCurrentThreadId(),entity,own,walk.flags,walk.count);
+    for(unsigned i=0;i<walk.count;++i) {
+        char hex[65]; uintptr_t at=tptr_audit_capture.at[i];
+        BOOL copied=tptr_audit_capture.readable[i]; hex[0]=0;
+        if(copied) for(unsigned j=0;j<32u;++j) snprintf(hex+j*2,3,"%02x",tptr_audit_capture.bytes[i][j]);
+        SudekiMpLogFormat("story_tptr event=node thread=%lu node=%p dump_at=%p readable=%u bytes=%s\r\n",
+            (unsigned long)GetCurrentThreadId(),(void *)walk.nodes[i],(void *)at,(unsigned)copied,hex);
+    }
+}
 static void *entity_from_gel_pointer(void *gel_pointer) {
     void **vtable;
     void *tracked_entity[3] = {NULL, NULL, NULL};
@@ -1558,7 +1594,9 @@ static void *entity_from_gel_pointer(void *gel_pointer) {
         gel_pointer_to_entity(gel_pointer, tracked_entity)) {
         entity = tracked_entity[0];
     }
+    tptr_audit(entity,tracked_entity,"before_cleanup");
     entity_pointer_cleanup(tracked_entity);
+    tptr_audit(entity,tracked_entity,"before_destroy");
     destroy = (GelPointerDeletingDestructor)vtable[0];
     destroy(gel_pointer, 1u);
     return entity;

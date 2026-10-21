@@ -30,7 +30,7 @@ void *SudekiMpLanStorySplitNodePause __attribute__((used));
 void *SudekiMpLanStorySplitNodeResume __attribute__((used));
 static DWORD native_thread;
 static BOOL host_ready,active,settled_inside,attached,observer_set;
-static uint8_t outside_mask,leader;
+static uint8_t outside_mask,away_mask,leader;
 static char temporary[48];
 static const void *temporary_data;
 typedef struct SplitResidency {
@@ -59,7 +59,12 @@ enum { RETURN_MAX_AGE_MS=5000 };
 static const char *residency_reason="not_captured";
 static DWORD residency_slot_protection[3];
 static uint8_t *exempt_group,*exempt_actor[MAX_EXEMPT],exempt_added[MAX_EXEMPT];
+static uint8_t exempt_before[MAX_EXEMPT];
+typedef struct ParkedMember {uint8_t *actor,*group,refs_before,added;} ParkedMember;
+static ParkedMember parked[4];
 static unsigned exempt_count,traces;
+static BOOL begin_no_members_reported;
+static BOOL parking_held(void) {for(unsigned c=0;c<4u;++c) if(parked[c].actor) return TRUE;return FALSE;}
 static volatile LONG test_preflight_reported;
 static BOOL readable(const void *p,size_t n) {
     MEMORY_BASIC_INFORMATION m; uintptr_t a=(uintptr_t)p;
@@ -113,14 +118,14 @@ static void __attribute__((thiscall)) lead_only(void *group) {
      * counter before the native call so exactly the added references are
      * removed, no more: a reference the actor already held stays. */
     uint8_t *actors[4]={0}; uint8_t refs_before[4]={0};
-    BOOL eligible=before==0 && readable(g,0xd4) && thread_exact() && host_ready && outside_mask &&
-        !exempt_count && g==*(uint8_t **)(base+GROUP);
+    BOOL eligible=before==0 && readable(g,0xd4) && thread_exact() && host_ready && (outside_mask|away_mask) &&
+        !parking_held() && !exempt_count && g==*(uint8_t **)(base+GROUP);
     if(eligible) {
         unsigned count=*(unsigned *)(g+0xcc);
         for(unsigned slot=1;slot<count && slot<4u;++slot) {
             uint8_t *actor=*(uint8_t **)(g+0x90+slot*0xc);
             unsigned c=character_of(actor);
-            if(c>=4u || !(outside_mask&(1u<<c)) || !readable(actor,0x30)) continue;
+            if(c>=4u || !((outside_mask|away_mask)&(1u<<c)) || !readable(actor,0x30)) continue;
             actors[slot]=actor; refs_before[slot]=actor[0x2b];
         }
     }
@@ -129,13 +134,20 @@ static void __attribute__((thiscall)) lead_only(void *group) {
     for(unsigned slot=1;slot<4u && exempt_count<MAX_EXEMPT;++slot) {
         uint8_t *actor=actors[slot];
         if(!actor || !readable(actor,0x30) || actor[0x2b]<=refs_before[slot]) continue;
-        unsigned added=actor[0x2b]-refs_before[slot];
+        unsigned added=actor[0x2b]-refs_before[slot],c=character_of(actor);
+        if(c<4u && (away_mask&(1u<<c))) {
+            parked[c]=(ParkedMember){actor,g,refs_before[slot],(uint8_t)added};
+            SudekiMpLogFormat("lan_story_split event=member_parked character=%u refs_before=%u added=%u refs_after=%u\r\n",
+                c,refs_before[slot],added,actor[0x2b]);
+            continue; /* native pause and subsequent door hide remain owned by vanilla */
+        }
         for(unsigned k=0;k<added;++k) node_resume(actor+8);
+        exempt_before[exempt_count]=refs_before[slot];
         exempt_actor[exempt_count]=actor; exempt_added[exempt_count]=(uint8_t)added; ++exempt_count;
         SudekiMpLogFormat("lan_story_split event=lead_only_exempt character=%u refs_before=%u added=%u refs_after=%u\r\n",
             character_of(actor),refs_before[slot],added,actor[0x2b]);
     }
-    if(exempt_count) exempt_group=g;
+    if(exempt_count || parking_held()) exempt_group=g;
 }
 /* H1b shop members (owner decision 2026-10-17, D11: players in the same
  * shop see each other). The door script's HidePartyMembers (0x24A70, right
@@ -297,7 +309,7 @@ BOOL SudekiMpLanStorySplitMemberLeasesHeld(void) {
     return FALSE;
 }
 static void __attribute__((thiscall)) full_party(void *group) {
-    uint8_t *g=group;
+    uint8_t *g=group;BOOL parked_group=g==exempt_group;
     /* Ending lead-only: our shows go before the native show balances. */
     if(thread_exact() && readable(g,0xd4) && *(int *)(g+0xd0)==1) release_all("full_party");
     if(exempt_count && thread_exact() && readable(g,0xd4) && *(int *)(g+0xd0)==1) {
@@ -316,6 +328,10 @@ static void __attribute__((thiscall)) full_party(void *group) {
         exempt_count=0; exempt_group=NULL;
     }
     ((GroupCall)full_hook.trampoline)(group);
+    if(parked_group && native_thread==GetCurrentThreadId() && readable(g,0xd4) && !*(int *)(g+0xd0)) {
+        memset(parked,0,sizeof(parked));
+        if(!exempt_count) exempt_group=NULL;
+    }
 }
 /* Native per-object animation update (ECX=object, stack dt, ret 4). */
 static void __attribute__((naked,noinline)) object_update(void *object __attribute__((unused)),uint32_t dt_bits __attribute__((unused))) {
@@ -516,6 +532,46 @@ static void capture_residency(void) {
     }
     fresh.data=temporary_data;fresh.leader=leader;fresh.exact=TRUE;residency=fresh;residency_reason="ready";
 }
+/* These records own only the exact pause references added by lead-only.
+ * The observer's settled snapshot and current native group agree before any
+ * counter change; no actor is acquired for input here. */
+static BOOL parking_exact(unsigned c,uint8_t *actor,uint8_t *group) {
+    return base && active && settled_inside && attached && observer_set && residency.exact &&
+        native_thread && native_thread==GetCurrentThreadId() && c<4u && c!=leader && actor &&
+        actor==residency.actors[c] && group==residency.group && group==exempt_group &&
+        *(void **)(base+GROUP)==group && retained_party_exact(&residency) &&
+        readable(group,0xd4) && *(int *)(group+0xd0)==1 && group_member(group,actor) &&
+        readable(actor,0x30) && character_of(actor)==c;
+}
+BOOL SudekiMpLanStorySplitMemberParked(unsigned c) {
+    return c<4u && native_thread==GetCurrentThreadId() && parked[c].actor!=NULL;
+}
+BOOL SudekiMpLanStorySplitUnparkMember(unsigned c) {
+    if(c>=4u) return FALSE;
+    ParkedMember *p=&parked[c];
+    if(!parking_exact(c,p->actor,p->group) || !p->added || p->actor[0x2b]<p->added ||
+        exempt_count>=MAX_EXEMPT) return FALSE;
+    for(unsigned k=0;k<p->added;++k) node_resume(p->actor+8);
+    exempt_actor[exempt_count]=p->actor;exempt_added[exempt_count]=p->added;
+    exempt_before[exempt_count++]=p->refs_before;
+    SudekiMpLogFormat("lan_story_split event=member_unparked character=%u added=%u refs_after=%u\r\n",c,p->added,p->actor[0x2b]);
+    memset(p,0,sizeof(*p));return TRUE;
+}
+BOOL SudekiMpLanStorySplitParkMember(unsigned c) {
+    if(c>=4u) return FALSE;
+    if(parked[c].actor) return parking_exact(c,parked[c].actor,parked[c].group);
+    for(unsigned i=0;i<exempt_count;++i) {
+        uint8_t *actor=exempt_actor[i];unsigned added=exempt_added[i];
+        if(!parking_exact(c,actor,exempt_group) || !added || actor[0x2b]+added>=250u) continue;
+        for(unsigned k=0;k<added;++k) node_pause(actor+8);
+        parked[c]=(ParkedMember){actor,exempt_group,exempt_before[i],(uint8_t)added};
+        --exempt_count;exempt_actor[i]=exempt_actor[exempt_count];exempt_added[i]=exempt_added[exempt_count];
+        exempt_before[i]=exempt_before[exempt_count];
+        SudekiMpLogFormat("lan_story_split event=member_parked character=%u refs_before=%u added=%u refs_after=%u\r\n",
+            c,parked[c].refs_before,added,actor[0x2b]);return TRUE;
+    }
+    return FALSE;
+}
 BOOL SudekiMpLanStorySplitExteriorActorExact(const SudekiMpLanStoryNativeRoster *r,unsigned c) {
     if(!base || !attached || !observer_set || !active || !settled_inside || !residency.exact ||
         native_thread!=GetCurrentThreadId() || !r || c>=4u || c==leader ||
@@ -583,7 +639,7 @@ BOOL SudekiMpLanStorySplitTestCanEnterTemporary(const char *name,unsigned lead) 
     if(!observer_set) return test_preflight_refused(TEST_NO_OBSERVER,0);
     if(!host_ready) return test_preflight_refused(TEST_NOT_READY,0);
     if(lead>=4u) return test_preflight_refused(TEST_BAD_LEADER,0);
-    if(!(outside_mask&~(1u<<lead))) return test_preflight_refused(TEST_NO_OUTSIDE,0);
+    if(!((outside_mask|away_mask)&~(1u<<lead))) return test_preflight_refused(TEST_NO_OUTSIDE,0);
     if(native_thread!=GetCurrentThreadId()) return test_preflight_refused(TEST_WRONG_THREAD,0);
     if(!name) return test_preflight_refused(TEST_NULL_NAME,0);
     for(size_t n=0;n<sizeof(temporary);++n) {
@@ -601,14 +657,20 @@ BOOL SudekiMpLanStorySplitTestCanEnterTemporary(const char *name,unsigned lead) 
 }
 static BOOL begin_temp(const char *name,unsigned lead) {
     clear_returned();
-    if(active || !attached || !host_ready || lead>=4u || !(outside_mask&~(1u<<lead)) ||
-        !thread_exact()) return FALSE;
+    if(active || !attached || !host_ready || lead>=4u || !thread_exact()) return FALSE;
+    if(!((outside_mask|away_mask)&~(1u<<lead))) {
+        if(!begin_no_members_reported) {
+            begin_no_members_reported=TRUE;
+            SudekiMpLogWrite("lan_story_split event=begin_refused reason=no_members\r\n");
+        }
+        return FALSE;
+    }
     size_t n=0; while(n<sizeof(temporary)-1u && readable(name+n,1) && name[n]) ++n;
     if(!n || name[n]) return FALSE;
     memcpy(temporary,name,n); temporary[n]=0;
     memset(&residency,0,sizeof(residency));
     active=TRUE; settled_inside=FALSE; leader=(uint8_t)lead; temporary_data=NULL;
-    SudekiMpLogFormat("lan_story_split event=begin temporary=%s leader=%u outside=%u\r\n",temporary,lead,outside_mask);
+    SudekiMpLogFormat("lan_story_split event=begin temporary=%s leader=%u outside=%u away=%u\r\n",temporary,lead,outside_mask,away_mask);
     return TRUE;
 }
 static BOOL begin_exit(void) {
@@ -653,6 +715,7 @@ static void settled(BOOL inside) {
 static void ended(BOOL vanilla) {
     SudekiMpLogFormat("lan_story_split event=ended vanilla=%u temporary=%s\r\n",vanilla,temporary);
     release_all("split_ended"); /* no observer call: its lock is held here */
+    memset(parked,0,sizeof(parked));
     active=settled_inside=FALSE; temporary_data=NULL; memset(temporary,0,sizeof(temporary));
     memset(&residency,0,sizeof(residency));
     if(vanilla || !returned.settled) clear_returned();
@@ -696,12 +759,13 @@ static void exit_skipped(void *context,const SudekiMpLanStoryTempExteriorReceipt
         (unsigned)r->terrain_enabled_entry,(unsigned)r->terrain_enabled_exit);
 }
 static const SudekiMpLanStoryTempExteriorConsumer exterior_consumer={keep_exterior,exit_skipped,NULL};
-void SudekiMpLanStorySplitSetEligibility(BOOL ready,uint8_t mask) {
+void SudekiMpLanStorySplitSetEligibility(BOOL ready,uint8_t mask,uint8_t away) {
     if(!base || !thread_exact()) return;
-    if(traces<32u && (ready!=host_ready || mask!=outside_mask)) {
-        ++traces; SudekiMpLogFormat("lan_story_split event=eligibility ready=%u outside=%u\r\n",ready,mask);
+    mask=(uint8_t)(mask&~away&15u);away&=15u;
+    if(traces<32u && (ready!=host_ready || mask!=outside_mask || away!=away_mask)) {
+        ++traces; SudekiMpLogFormat("lan_story_split event=eligibility ready=%u outside=%u away=%u\r\n",ready,mask,away);
     }
-    host_ready=ready; outside_mask=(uint8_t)(mask&15u);
+    host_ready=ready;outside_mask=mask;away_mask=away;
 }
 BOOL SudekiMpLanStorySplitActive(void) {return active;}
 const void *SudekiMpLanStorySplitTemporaryData(void) {return active&&settled_inside?temporary_data:NULL;}
@@ -709,7 +773,7 @@ BOOL SudekiMpLanStorySplitUninstall(void) {
     if(!native_thread || native_thread==GetCurrentThreadId()) clear_returned();
     if(!base) return TRUE;
     if(native_thread==GetCurrentThreadId()) release_all("uninstall");
-    if(active || exempt_count || SudekiMpLanStorySplitMemberLeasesHeld()) {SetLastError(ERROR_BUSY); return FALSE;}
+    if(active || exempt_count || parking_held() || SudekiMpLanStorySplitMemberLeasesHeld()) {SetLastError(ERROR_BUSY); return FALSE;}
     if(observer_set) {
         if(!SudekiMpLanStoryObserverSetSplit(NULL)) {SetLastError(ERROR_BUSY); return FALSE;}
         observer_set=FALSE;
@@ -722,7 +786,8 @@ BOOL SudekiMpLanStorySplitUninstall(void) {
     }
     if(!attached && !SudekiMpLanStoryTempExteriorUninstall()) ok=FALSE;
     if(!ok) {SetLastError(ERROR_BUSY); return FALSE;}
-    base=NULL; native_thread=0; host_ready=FALSE; outside_mask=0;
+    base=NULL; native_thread=0; host_ready=FALSE; outside_mask=away_mask=0;
+    memset(parked,0,sizeof(parked));begin_no_members_reported=FALSE;
     visibility_exact=FALSE; ro_set=ro_clr=NULL; memset(shows,0,sizeof(shows));
     InterlockedExchange(&test_preflight_reported,0);
     return TRUE;

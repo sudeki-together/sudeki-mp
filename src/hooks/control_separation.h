@@ -370,4 +370,11 @@ BOOL SudekiMpControlSeparationUpdateDispatchWitnessStillExact(
  * dangling native entry point. */
 BOOL SudekiMpUninstallControlSeparation(void);
 
+/* Story host adapter only. Called on the owned service controller seam,
+ * immediately before the original (after skill input restoration). FALSE
+ * quarantines that dispatch: no original call and no post-original witness.
+ * Registration/removal is on the native thread, with no dispatch active. */
+typedef BOOL (*SudekiMpStoryHostInputGuard)(void *controller);
+BOOL SudekiMpControlSeparationStoryInputGuard(SudekiMpStoryHostInputGuard guard);
+
 #endif

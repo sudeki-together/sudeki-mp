@@ -82,9 +82,11 @@ BOOL SudekiMpLanStoryControlActorOwned(const SudekiMpControlUpdateDispatchWitnes
         SudekiMpLanStoryObserverNativeRosterExact(r) &&
         SudekiMpLanPartyControlStoryTurnOwner(r->actors[c],&key) && key.seat==c;
 }
+static BOOL native_none_async;
 static void __attribute__((thiscall)) native_none(void *c) {
     assert(c==controller); ++none_calls;
-    *(int *)(controller+0x80)=*(int *)(controller+0x84)=0;
+    *(int *)(controller+0x84)=0;
+    if(!native_none_async) *(int *)(controller+0x80)=0;
 }
 static void __attribute__((thiscall)) native_all(void *c) {
     assert(c==controller); ++all_calls;
@@ -453,11 +455,19 @@ static void test_shop_image(const char *path) {
         assert(!memcmp(base+pause_sites[i].rva,pause_sites[i].bytes,pause_sites[i].size));
         printf("PASS named %s exact supported image node+23 / actor+2B contract\n",pause_sites[i].name);
     }
+    assert(lead_settle_entries_exact());
+    const unsigned settle_sites[4][2]={{0x285c9,20},{0x285f8,5},{0x38c50,8},{0x38c8b,3}};
+    for(unsigned i=0;i<4;++i) for(unsigned j=0;j<settle_sites[i][1];++j) {
+        base[settle_sites[i][0]+j]^=1;assert(!lead_settle_entries_exact());
+        base[settle_sites[i][0]+j]^=1;assert(lead_settle_entries_exact());
+    }
+    puts("PASS named ArrivalFilterCommit exact supported tail/camera ABI, all 36 byte mutations refused");
     assert(VirtualFree(base,0,MEM_RELEASE)); base=synthetic;
 }
+#include "story_arrival_host_fixture.h"
 int main(int argc,char **argv) {
     assert(argc==1 || argc==2);
-    base=VirtualAlloc(NULL,0x409000,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
+    base=VirtualAlloc(NULL,0x410000,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
     assert(base);
     jump(FILTER_NONE,native_none); jump(FILTER_ALL,native_all);
     assert(FlushInstructionCache(GetCurrentProcess(),base,0x409000));
@@ -513,6 +523,7 @@ int main(int argc,char **argv) {
     test_interior_approach_steering();
     test_interior_approach_resident_house();
     test_visit_settled_member();
+    test_arrival_host();
     if(argc==2) test_shop_image(argv[1]);
     VirtualFree(base,0,MEM_RELEASE); base=NULL;
     puts("story host filter lease regression tests passed (synthetic, no gameplay)");

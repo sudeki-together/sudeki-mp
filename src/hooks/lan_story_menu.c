@@ -261,7 +261,10 @@ static BOOL command(SudekiMpPartyMenuAction action,unsigned argument) {
         return TRUE;
     case SUDEKIMP_PARTY_MENU_AWAY:
     case SUDEKIMP_PARTY_MENU_RETURN:
-        return argument==local_player && SudekiMpLanStoryRuntimeRequestAway(action==SUDEKIMP_PARTY_MENU_AWAY);
+        if(argument!=local_player || !SudekiMpLanStoryRuntimeRequestAway(action==SUDEKIMP_PARTY_MENU_AWAY)) return FALSE;
+        menu_open=FALSE;
+        SudekiMpLogFormat("lan_story_menu event=closed player=%u world_pause_requested=0\r\n",local_player);
+        return TRUE;
     case SUDEKIMP_PARTY_MENU_LEAVE:
         if(argument) return FALSE;
         leave_requested=TRUE;

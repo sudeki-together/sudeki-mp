@@ -5,4 +5,5 @@ typedef struct SudekiMpStoryAwayLayout { float x,y,width,size; } SudekiMpStoryAw
 /* pixels is the atlas-measured width at 20 * min(W/960,H/720). */
 int SudekiMpStoryAwayBannerLayout(unsigned width,unsigned height,float pixels,SudekiMpStoryAwayLayout *);
 int SudekiMpStoryAwayBannerRender(void *image,void *device,SudekiMpStoryAwayPhase,unsigned character);
+int SudekiMpStoryAwayBannerRenderMessage(void *image,void *device,SudekiMpStoryAwayPhase,unsigned character,const char *message);
 #endif

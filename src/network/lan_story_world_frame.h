@@ -7,10 +7,10 @@
  * to create objects, execute scripts, select assets or apply damage. Native
  * playback must resolve each identity to an already loaded exact NPC or
  * canonical party owner, or an already loaded generic scenery entity. */
-#define SUDEKIMP_LAN_STORY_WORLD_VERSION 12u
-#define SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS 64u
+#define SUDEKIMP_LAN_STORY_WORLD_VERSION 13u
+#define SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS 128u
 #define SUDEKIMP_LAN_STORY_WORLD_CHUNK_ACTORS 8u
-#define SUDEKIMP_LAN_STORY_WORLD_MAX_CHUNKS 8u
+#define SUDEKIMP_LAN_STORY_WORLD_MAX_CHUNKS 16u
 #define SUDEKIMP_LAN_STORY_WORLD_HEADER_SIZE 28u
 #define SUDEKIMP_LAN_STORY_WORLD_ACTOR_SIZE 144u
 #define SUDEKIMP_LAN_STORY_WORLD_CHUNK_MAX_SIZE (28u + 8u * 144u)

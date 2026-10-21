@@ -123,6 +123,13 @@ BOOL SudekiMpLanStoryClientPresent(SudekiMpLanStoryClientPresentation callback,
  * update or retained permission. The callback may copy plain geometry only. */
 BOOL SudekiMpLanStoryClientObserveDispatch(const SudekiMpControlUpdateDispatchWitness *witness,
     SudekiMpLanStoryClientPresentation callback,void *context);
+/* Retained view restoration on the fresh controller post-update dispatch.
+ * Uses the same full containment bracket as ObserveDispatch. The callback
+ * may restore its exact borrowed camera/view, using ClientRosterExact; it
+ * may not start native movies, simulation, tasks or alter the pause. Scope
+ * ends and containment is rechecked before the caller starts playback. */
+BOOL SudekiMpLanStoryClientRestoreViewDispatch(const SudekiMpControlUpdateDispatchWitness *witness,
+    SudekiMpLanStoryClientPresentation callback,void *context);
 /* Separate cosmetic render boundary. The witness must positively identify
  * the currently active, exact native effects hook on every check. A full
  * registry/pause/input/task proof brackets the callback, without granting

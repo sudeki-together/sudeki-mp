@@ -132,7 +132,9 @@ static void menu_and_away(void) {
     CHECK(SudekiMpPartySetAbsencePolicy(&s,0,s.last_request[0]+1,1,s.assignment.revision,
         SUDEKIMP_PARTY_SHARED_PAUSE)==SUDEKIMP_PARTY_SWAP_OK);
     CHECK(!s.paused); /* Policy changes are not retroactive. */
+    uint32_t no_op=s.last_request[1]+1,revision=s.assignment.revision;
     CHECK(presence(&s,1,0,1)==SUDEKIMP_PARTY_SWAP_OK && !s.paused);
+    CHECK(s.last_request[1]==no_op && s.assignment.revision==revision);
     CHECK(presence(&s,1,0,0)==SUDEKIMP_PARTY_SWAP_OK);
     acquire(&s,1);
     CHECK(presence(&s,1,1,0)==SUDEKIMP_PARTY_SWAP_OK && !s.paused);

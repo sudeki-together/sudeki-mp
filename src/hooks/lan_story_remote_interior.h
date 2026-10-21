@@ -35,6 +35,12 @@
  * Doors need a measured arrival spot and return point; only the shops in the
  * table are handled. Native thread only. */
 BOOL SudekiMpLanStoryRemoteInteriorInitialize(HMODULE image);
+/* Host native thread, after control drain: park an exterior body or retain an
+ * already-inside AI visit. Return: -1 unavailable/stay away, 0 busy (hold/loading/unpark),
+ * 1 admitted (ordinary return or completed placement/show). */
+void SudekiMpLanStoryRemoteInteriorAwayDrained(const SudekiMpLanStoryNativeRoster *,const SudekiMpLanStoryScene *,unsigned character);
+int SudekiMpLanStoryRemoteInteriorAwayReturn(const SudekiMpLanStoryNativeRoster *,const SudekiMpLanStoryScene *,unsigned character,uint32_t now);
+const char *SudekiMpLanStoryRemoteInteriorPlaceName(const char *zone);
 /* Host, once per native frame with an exact READY roster. remote_characters:
  * characters driven by connected remote players; input_fresh: those whose
  * player's control input arrived recently (a member inside without input
@@ -94,4 +100,5 @@ BOOL SudekiMpLanStoryRemoteInteriorHostLeadEntryMember(const SudekiMpLanStoryNat
 /* Host, native thread: `character` is settled inside a background visit
  * kept by this module (not leaving, not parked): a body of its own. */
 BOOL SudekiMpLanStoryRemoteInteriorHostVisitSettled(const SudekiMpLanStoryNativeRoster *roster,unsigned character);
+void SudekiMpLanStoryRemoteInteriorCancelAwayReturn(unsigned character);
 #endif

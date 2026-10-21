@@ -22,4 +22,5 @@ void SudekiMpLanStorySkyReleaseHeld(BOOL apply);
 void SudekiMpLanStorySkyCapture(SudekiMpStoryEffectState *out);
 /* Client: replay calls newer than the last applied ones. */
 void SudekiMpLanStorySkyFollow(const SudekiMpStoryEffectState *host);
+void SudekiMpLanStorySkySetClient(BOOL client);
 #endif

@@ -72,7 +72,7 @@ static struct {uint32_t epoch,tick;float x,z;} scale[4];
 typedef struct EnemyFrame {
     uint32_t serial,stamp,group_id;
     float x,z;
-    unsigned type,excluded,ranged_capable,target_seat,aware;
+    unsigned type,excluded,ranged_capable,target_seat,aware,position_unknown;
 } EnemyFrame;
 static EnemyFrame unit_table[128];
 static unsigned unit_count;
@@ -520,16 +520,16 @@ static void touch_shooter(unsigned shooter,uint32_t now) {
 }
 static void raise_alert(SudekiMpStoryThreatRecord *r,unsigned shooter,unsigned kind,int added,uint32_t now) {
     EnemyFrame *origin=frame_of(r->serial);
-    if(!table_complete || !origin) return;
+    if(!table_complete || !origin || origin->position_unknown) return;
     for(unsigned set=0;set<STORY_SET_COUNT;++set) {
         if(!SudekiMpStoryThreatAlertRaise(&config,set_level(set),cooperative,origin->type,origin->excluded,set,r,
             shooter,kind,added,shooter_alert_active(set,shooter),now)) continue;
         SudekiMpStoryThreatCandidate candidates[128];unsigned count=0;
         for(unsigned i=0;i<unit_count;++i) {
             EnemyFrame *u=&unit_table[i];SudekiMpStoryThreatRecord *candidate=record_of(u->serial);
-            if(!candidate) continue;
+            if(!candidate || u->position_unknown) continue;
             candidates[count++]=(SudekiMpStoryThreatCandidate){.serial=u->serial,.distance=hypotf(u->x-origin->x,u->z-origin->z),
-                .ranged_capable=u->ranged_capable,.same_group=u->group_id && origin->group_id && u->group_id==origin->group_id,
+                .ranged_capable=u->ranged_capable,.same_group=SudekiMpStoryThreatSameGroup(u->group_id,origin->group_id),
                 .type=u->type,.excluded=u->excluded,.substitutable=SudekiMpStoryThreatSubstitutable(candidate),
                 .shooter_listed=SudekiMpStoryThreatShooterListed(&config,candidate,shooter,now),
                 .designated=SudekiMpStoryThreatDesignated(candidate,set,push_view()),.current_target_seat=u->target_seat,
@@ -553,7 +553,7 @@ static void raise_alert(SudekiMpStoryThreatRecord *r,unsigned shooter,unsigned k
 }
 static BOOL responder_close(unsigned shooter,uint32_t serial) {
     EnemyFrame *u=frame_of(serial);
-    return table_complete && shooter<4 && !seat_frames[shooter].position_unknown && u &&
+    return table_complete && shooter<4 && !seat_frames[shooter].position_unknown && u && !u->position_unknown &&
         hypotf(seat_frames[shooter].x-u->x,seat_frames[shooter].z-u->z)<=config.value[STORY_CLOSE_DISTANCE];
 }
 static uint32_t aware_pick(unsigned seat,unsigned set) {
@@ -561,7 +561,7 @@ static uint32_t aware_pick(unsigned seat,unsigned set) {
     uint32_t best=0;float distance=INFINITY;
     for(unsigned i=0;i<unit_count;++i) {
         EnemyFrame *u=&unit_table[i];SudekiMpStoryThreatRecord *r=record_of(u->serial);
-        if(!u->aware || u->type<1 || u->type>3 || u->excluded || !r ||
+        if(u->position_unknown || !u->aware || u->type<1 || u->type>3 || u->excluded || !r ||
             SudekiMpStoryThreatDesignated(r,set,push_view()) || !SudekiMpStoryThreatSubstitutable(r)) continue;
         float d=hypotf(u->x-seat_frames[seat].x,u->z-seat_frames[seat].z);
         if(isfinite(d) && d<=config.value[STORY_IDLE_RADIUS] && d<distance) {best=u->serial;distance=d;}
@@ -978,10 +978,12 @@ static void walk(uint32_t now) {
                 if((ai[0xf2]&1) && distance<s->melee_distance) s->melee_distance=distance;
             }
         }
-        if(lease && positioned) {
+        /* Preserve target identity even when distance is unknown: an active
+         * push must discount its own engagement. Distance users skip this row. */
+        if(lease) {
             if(unit_count>=128) {table_complete=FALSE;continue;}
             unit_table[unit_count++]=(EnemyFrame){.serial=lease->serial,.stamp=walk_sequence,.group_id=lease->group_id,
-                .x=x,.z=z,.type=*(uint32_t *)(ai+0x148),.excluded=excluded_unit(a,lease->resource),
+                .x=positioned?x:NAN,.z=positioned?z:NAN,.position_unknown=!positioned,.type=*(uint32_t *)(ai+0x148),.excluded=excluded_unit(a,lease->resource),
                 .ranged_capable=(ai[0x46]&1)!=0,.target_seat=c,.aware=!target && *(uintptr_t *)(ai+0xf4)!=0};
         }
     }

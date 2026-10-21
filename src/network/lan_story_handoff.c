@@ -1,3 +1,4 @@
+#include "network/story_arrival.h"
 #include "network/lan_story_handoff.h"
 #include <math.h>
 #include <string.h>
@@ -120,7 +121,8 @@ BOOL SudekiMpLanStoryControlMatchesScene(const SudekiMpLanStoryControlFence *f,
     const SudekiMpLanStoryScene *s) {
     return SudekiMpLanStoryControlFenceValid(f) && SudekiMpLanStorySceneValid(s) &&
         s->phase==SUDEKIMP_LAN_STORY_READY && f->epoch==s->epoch && f->revision<=s->revision &&
-        (s->available_mask&(1u<<f->character)) && s->leader_seat!=f->character;
+        (s->available_mask&(1u<<f->character)) &&
+        (s->leader_seat!=f->character || SudekiMpStoryArrivalSolo(s));
 }
 BOOL SudekiMpLanStoryControlStateValid(const SudekiMpLanStoryControlState *s) {
     return s && SudekiMpLanStoryControlFenceValid(&s->fence) &&

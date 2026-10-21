@@ -1279,7 +1279,13 @@ static void service_player_one_skill_direct_movement(void *controller) {
         arbiter, world_direction, magnitude);
 }
 
-static void call_original_controller_update_with_skill_input_isolation(
+static SudekiMpStoryHostInputGuard story_host_input_guard;
+static BOOL story_host_input_guard_active;
+BOOL SudekiMpControlSeparationStoryInputGuard(SudekiMpStoryHostInputGuard guard) {
+    if(story_host_input_guard_active || (story_host_input_guard && guard && guard!=story_host_input_guard)) return FALSE;
+    story_host_input_guard=guard;return TRUE;
+}
+static BOOL call_original_controller_update_with_skill_input_isolation(
     void *controller,
     void *update_data
 ) {
@@ -1444,7 +1450,11 @@ static void call_original_controller_update_with_skill_input_isolation(
         *borrowed_movement_mode = 0;
     }
     SetLastError(incoming_last_error);
-    original_controller_update(controller, update_data);
+    BOOL called=TRUE;
+    if(service_only_mode && story_host_input_guard) {
+        story_host_input_guard_active=TRUE;called=story_host_input_guard(controller);story_host_input_guard_active=FALSE;
+    }
+    if(called) original_controller_update(controller, update_data);
     native_last_error = GetLastError();
     if (borrowed_movement_mode != NULL &&
         readable_memory(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL, sizeof(void *)) &&
@@ -1459,7 +1469,7 @@ static void call_original_controller_update_with_skill_input_isolation(
      * entirely. If that callsite did not already submit through the LAN
      * wrapper, consume the same current controller axes here and use the
      * proven camera transform plus absolute-delta movement boundary. */
-    service_player_one_skill_direct_movement(controller);
+    if(called) service_player_one_skill_direct_movement(controller);
     player_one_skill_direct_movement_scope_active = FALSE;
     player_one_skill_direct_movement_operator_override = FALSE;
     player_one_skill_frame_delta = 0.0f;
@@ -1474,6 +1484,7 @@ static void call_original_controller_update_with_skill_input_isolation(
         *(int *)(game_speed + 0x24u) = requested_mode;
     }
     SetLastError(native_last_error);
+    return called;
 }
 
 static BOOL game_code_pointer(const void *pointer) {
@@ -4960,10 +4971,10 @@ static void SUDEKIMP_THISCALL service_control_update_observers(
         }
         return;
     }
-    call_original_controller_update_with_skill_input_isolation(controller, update_data);
-    ++dispatch_frame.original_call_count;
+    if(call_original_controller_update_with_skill_input_isolation(controller, update_data))
+        ++dispatch_frame.original_call_count;
     native_last_error = GetLastError();
-    notify_update_observers(
+    if(dispatch_frame.original_call_count==1u) notify_update_observers(
         controller,
         update_data,
         &dispatch_frame,
@@ -8005,8 +8016,42 @@ static BOOL story_control_boundary(const SudekiMpControlUpdateDispatchWitness *w
         roster->leader_character<4u && (roster->available_mask&(1u<<roster->leader_character)) &&
         SudekiMpLanStoryObserverRosterStillExact(w,roster);
 }
-/* Set only while SudekiMpLanPartyControlStoryDrain runs (game thread). */
+/* Release-only role/epoch relaxation never grants new input. */
 static BOOL story_drain_scope_relaxed;
+static struct {
+    void *world,*group,*controller,*tal,*ai,*ailish;
+    BOOL enabled;
+} story_lead_scope;
+BOOL SudekiMpLanPartyControlStoryLeadScope(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *r,BOOL enabled) {
+    if(!enabled) {
+        if(SudekiMpLanPartyControlStoryRetains()) return FALSE;
+        ZeroMemory(&story_lead_scope,sizeof(story_lead_scope));return TRUE;
+    }
+    if(!story_control_boundary(w,r) || !party_native_entries_exact() ||
+        !((r->available_mask==4u && r->leader_character==2u) ||
+          (r->available_mask==12u && (r->leader_character==3u || r->leader_character==2u))) || !r->actors[2] || !r->ai[2]) return FALSE;
+    if(story_lead_scope.enabled && (story_lead_scope.world!=r->world ||
+        story_lead_scope.group!=r->group || story_lead_scope.controller!=r->controller ||
+        story_lead_scope.tal!=r->actors[2] || story_lead_scope.ai!=r->ai[2])) {
+        if(SudekiMpLanPartyControlStoryRetains()) return FALSE;
+        ZeroMemory(&story_lead_scope,sizeof(story_lead_scope));
+    }
+    story_lead_scope.world=r->world;story_lead_scope.group=r->group;story_lead_scope.controller=r->controller;
+    story_lead_scope.tal=r->actors[2];story_lead_scope.ai=r->ai[2];
+    if(r->actors[3]) story_lead_scope.ailish=r->actors[3];
+    story_lead_scope.enabled=TRUE;return TRUE;
+}
+static BOOL story_lead_role(const SudekiMpLanStoryNativeRoster *r,unsigned c) {
+    return story_lead_scope.enabled && c==2u && r &&
+        r->world==story_lead_scope.world && r->group==story_lead_scope.group &&
+        r->controller==story_lead_scope.controller && r->actors[2]==story_lead_scope.tal &&
+        r->ai[2]==story_lead_scope.ai &&
+        ((r->available_mask==4u && r->leader_character==2u) ||
+         (r->available_mask==12u && (r->leader_character==3u ||
+            (story_drain_scope_relaxed && r->leader_character==2u)) && r->actors[3]==story_lead_scope.ailish));
+}
+
 static BOOL story_control_scope(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster) {
     return InterlockedCompareExchange(&story_native_control.bound,0,0) &&
@@ -8031,7 +8076,8 @@ static BOOL story_control_observe(const SudekiMpControlUpdateDispatchWitness *w,
     unsigned matches=0;
     if(!story_key_valid(key) || !out || !story_control_scope(w,roster) ||
         !party_native_entries_exact()) return FALSE;
-    if(key->seat==roster->leader_character || !(roster->available_mask&(1u<<key->seat))) return FALSE;
+    if((key->seat==roster->leader_character && !story_lead_role(roster,key->seat)) ||
+        !(roster->available_mask&(1u<<key->seat))) return FALSE;
     actor=roster->actors[key->seat]; ai=roster->ai[key->seat]; controller=roster->controller;
     if(party_actor(key->seat)!=actor) return FALSE;
     if(!readable_memory(actor,0xdcu) || *(void **)actor!=game_base+actor_vt[key->seat] ||
@@ -8061,7 +8107,9 @@ static BOOL story_control_identity(const SudekiMpControlUpdateDispatchWitness *w
         party_key_equal(&owned->key,key) &&
         story_control_observe(w,roster,key,&fresh,slot_out) &&
         owned->actor==fresh.actor && owned->group==fresh.group &&
-        owned->controller==fresh.controller && owned->host==fresh.host &&
+        owned->controller==fresh.controller && (owned->host==fresh.host ||
+            (story_drain_scope_relaxed && story_lead_role(roster,key->seat) &&
+             (owned->host==story_lead_scope.tal || owned->host==story_lead_scope.ailish))) &&
         owned->ai==fresh.ai && owned->mode==fresh.mode;
 }
 static BOOL story_control_stop(const SudekiMpControlUpdateDispatchWitness *w,
@@ -8095,8 +8143,8 @@ BOOL SudekiMpLanPartyControlStoryBegin(const SudekiMpControlUpdateDispatchWitnes
             party_menu_filter_owned || !party_actor_leases_empty() || !party_native_entries_exact()) return FALSE;
         story_native_control.world=roster->world; story_native_control.descriptor=roster->descriptor;
         story_native_control.epoch=roster->epoch;
-        /* Preserve monotonically increasing lease serials across world loads. */
-        ZeroMemory(&story_native_control.released,sizeof(story_native_control.released));
+        /* Preserve released keys as well as monotonically increasing lease
+         * serials: another seat can still be finishing its pre-load drain. */
         ZeroMemory(&story_native_control.turn_roster,sizeof(story_native_control.turn_roster));
         return story_control_scope(w,roster);
     }
@@ -8138,7 +8186,7 @@ BOOL SudekiMpLanPartyControlStoryTurnOwner(void *actor,SudekiMpLanPartyLease *ke
         if(owned->actor!=actor || owned->phase!=PARTY_NATIVE_HELD ||
             !story_key_valid(&owned->key) || owned->key.generation!=story_native_control.last_generation[c] ||
             roster->epoch!=story_native_control.epoch || roster->world!=story_native_control.world ||
-            roster->actors[c]!=actor || roster->leader_character==c ||
+            roster->actors[c]!=actor || (roster->leader_character==c && !story_lead_role(roster,c)) ||
             roster->group!=owned->group || roster->controller!=owned->controller ||
             roster->actors[roster->leader_character<4u?roster->leader_character:0]!=owned->host ||
             !SudekiMpLanStoryObserverNativeRosterExact(roster) ||
@@ -8185,6 +8233,9 @@ static void story_acquire_refusal(unsigned seat,const char *why,uint32_t detail)
     SudekiMpLogFormat("story_native_control event=acquire_refused seat=%u reason=%s detail=%lu\r\n",
         seat,why,(unsigned long)detail);
 }
+static unsigned story_default_mode(const SudekiMpLanStoryNativeRoster *r,unsigned c) {
+    return r && r->leader_character==c && story_lead_role(r,c)?0u:1u;
+}
 BOOL SudekiMpLanPartyControlStoryAcquire(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,
     SudekiMpLanPartyControlDrainProbe ready) {
@@ -8204,7 +8255,7 @@ BOOL SudekiMpLanPartyControlStoryAcquire(const SudekiMpControlUpdateDispatchWitn
         before.controller!=fresh.controller || before.host!=fresh.host ||
         before.ai!=fresh.ai || before.mode!=fresh.mode || owned->phase!=PARTY_NATIVE_EMPTY) why="identity_drift";
     else if(*(int16_t *)((uint8_t *)fresh.ai+0x16au)!=0) why="ai_override";
-    else if(((uint8_t *)fresh.mode)[0xbu]!=1u) why="ai_mode";
+    else if(((uint8_t *)fresh.mode)[0xbu]!=story_default_mode(roster,key->seat)) why="ai_mode";
     if(why) { story_acquire_refusal(key->seat,why,key->generation); return FALSE; }
     uint32_t previous=story_native_control.last_generation[key->seat];
     *owned=fresh; owned->phase=PARTY_NATIVE_QUARANTINED;
@@ -8218,7 +8269,7 @@ BOOL SudekiMpLanPartyControlStoryAcquire(const SudekiMpControlUpdateDispatchWitn
         return story_control_stop(w,roster,key);
     }
     if(*(int16_t *)((uint8_t *)owned->ai+0x16au)==0 &&
-        ((uint8_t *)owned->mode)[0xbu]==1u) {
+        ((uint8_t *)owned->mode)[0xbu]==story_default_mode(roster,key->seat)) {
         story_control_forget(key->seat); story_native_control.last_generation[key->seat]=previous;
     }
     return FALSE;
@@ -8531,13 +8582,13 @@ static BOOL story_control_drain(const SudekiMpControlUpdateDispatchWitness *w,
          * unavailable post-call observation without repeating that call. */
         if(party_ai_owned(owned)) owned->phase=PARTY_NATIVE_DRAINING;
         else if(*(int16_t *)((uint8_t *)owned->ai+0x16au)==0 &&
-            ((uint8_t *)owned->mode)[0xbu]==1u) {
+            ((uint8_t *)owned->mode)[0xbu]==story_default_mode(roster,key->seat)) {
             story_control_forget(key->seat); return TRUE;
         } else return story_drain_refused("quarantine_owner",key,roster,owned);
     }
     if(owned->phase==PARTY_NATIVE_RELEASE_VERIFY) {
         if(*(int16_t *)((uint8_t *)owned->ai+0x16au)==0 &&
-            ((uint8_t *)owned->mode)[0xbu]==1u && drained(key,owned->actor,w) &&
+            ((uint8_t *)owned->mode)[0xbu]==story_default_mode(roster,key->seat) && drained(key,owned->actor,w) &&
             story_control_identity(w,roster,key,NULL)) {
             story_control_forget(key->seat); return TRUE;
         }
@@ -8554,7 +8605,7 @@ static BOOL story_control_drain(const SudekiMpControlUpdateDispatchWitness *w,
     party_call_ai(FALSE,slot);
     if(!story_control_identity(w,roster,key,NULL)) return FALSE;
     if(*(int16_t *)((uint8_t *)owned->ai+0x16au)==0 &&
-        ((uint8_t *)owned->mode)[0xbu]==1u) { story_control_forget(key->seat); return TRUE; }
+        ((uint8_t *)owned->mode)[0xbu]==story_default_mode(roster,key->seat)) { story_control_forget(key->seat); return TRUE; }
     if(party_ai_owned(owned)) owned->phase=PARTY_NATIVE_DRAINING;
     return FALSE;
 }
@@ -8578,7 +8629,11 @@ static BOOL story_load_identity(const PartyNativeLease *owned,unsigned seat,void
         *(void **)ai!=game_base+0x2d4924u || *(void **)(ai+0x10u)!=(void *)actor ||
         *(void **)(ai+0x3cu)!=owned->mode || !readable_memory(owned->mode,0xcu) ||
         !readable_memory(controller,0x24cu) || *(void **)controller!=game_base+0x2c9f5cu ||
-        *(void **)(controller+0x248u)!=owned->host ||
+        (*(void **)(controller+0x248u)!=owned->host &&
+         !(story_lead_scope.enabled && seat==2u && actor==story_lead_scope.tal &&
+           ai==story_lead_scope.ai && group==story_lead_scope.group && controller==story_lead_scope.controller &&
+           (owned->host==story_lead_scope.tal || owned->host==story_lead_scope.ailish) &&
+           (*(void **)(controller+0x248u)==actor || *(void **)(controller+0x248u)==story_lead_scope.ailish))) ||
         !readable_memory(group,0xd0u) || !(count=*(unsigned *)(group+0xccu)) || count>4u) return FALSE;
     for(unsigned i=0;i<count;++i) {
         void **candidate=(void **)(group+0x90u+i*0xcu);
@@ -8589,7 +8644,9 @@ static BOOL story_load_identity(const PartyNativeLease *owned,unsigned seat,void
     return TRUE;
 }
 static BOOL story_load_released(const PartyNativeLease *owned) {
-    return *(int16_t *)((uint8_t *)owned->ai+0x16au)==0 && ((uint8_t *)owned->mode)[0xbu]==1u;
+    unsigned mode=story_lead_scope.enabled && owned->actor==story_lead_scope.tal &&
+        *(void **)((uint8_t *)owned->controller+0x248u)==owned->actor?0u:1u;
+    return *(int16_t *)((uint8_t *)owned->ai+0x16au)==0 && ((uint8_t *)owned->mode)[0xbu]==mode;
 }
 BOOL SudekiMpLanPartyControlStoryLoadDrain(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanPartyLease *key,SudekiMpLanPartyControlDrainProbe drained) {
@@ -8684,6 +8741,7 @@ BOOL SudekiMpLanPartyControlStoryEnd(void) {
     story_native_control.descriptor=NULL; story_native_control.epoch=0;
     ZeroMemory(story_native_control.last_generation,sizeof(story_native_control.last_generation));
     ZeroMemory(&story_native_control.released,sizeof(story_native_control.released));
+    ZeroMemory(&story_lead_scope,sizeof(story_lead_scope));
     return TRUE;
 }
 
@@ -9502,7 +9560,7 @@ BOOL SudekiMpUninstallControlSeparation(void) {
             "controller_update_dispatch_in_flight", ERROR_BUSY);
         return FALSE;
     }
-    if (SudekiMpLanPartyControlHasLeases() || party_render_observer ||
+    if (story_host_input_guard || SudekiMpLanPartyControlHasLeases() || party_render_observer ||
         party_render_hooks[0].installed || party_render_hooks[1].installed) {
         release_control_update_lifecycle();
         retain_control_separation_dependencies(

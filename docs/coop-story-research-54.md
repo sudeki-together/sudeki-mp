@@ -628,41 +628,51 @@ Never hook inside the hashed bodies of 0x423F60/0x424060.
 
 ### H1rest — Farmhouse sword chest against D11; more shops in the door table
 
+**Citation correction (2026-10-20 review):** numeric plan references below
+(e.g. 6483, 6798 and 6794, also repeated in the death-receipt digest/review)
+are historical locations at 9081425. The B6 retirement removed the §10
+farmhouse take-along row and its dependent premise; those line numbers no
+longer establish a current owner decision or route requirement. Use the
+corrected October 14 entry and stage-1.1 §9 entry by heading. The proposed
+explicit remote farmhouse entry remains an owner decision; native TEMP is
+lead-only.
+
+
 **State today.** At 9081425 the door table and the shopkeeper table each hold one row: LNBr_Kamo_shop with NPC_Kamo_NB (`src/hooks/lan_story_remote_interior.c:55-67`, `src/hooks/lan_story_shopkeepers.h:12-14`). When the lead is in any other house, members stay outside (`:571-573`). H1a's remote chest open is accepted live once, outdoors at E3_NB_ShdCamp (plan 6563-6567). The owner's first chest gate is the farmhouse sword chest (plan 6483). D11 keeps that story house lead-only (plan 68), and §10 lists the conflict as an owner decision (plan 6798). The castle Kamo is kept out only by its absence from both tables. Only the keeper table has a pure test (`tests/story_presentation_privacy_test.c:12-20`).
 
 **What the game does (evidence).**
 - The chest is Boss_Chest_Mungo in LICo_Frappe_Farm. The door opens only once the story block reaches 1200, which Mungo's death sets; the block is the int16 at RVA 0x3C2FEC. No interior script writes story state: the writes 1115, 2250 and 7255 come from the outdoor FARM_HOUSE cluster script. CONFIRMED_STATIC, SOLWORLDM.gex 0x5FAF4, 0x68533, 0x14FD0; RVA 0xFD9C0.
 - EnterTemporaryZone (RVA 0x64B0) refuses any target whose state is non-zero (0x64EE). It stores the front's position as the return point (CONFIRMED_STATIC). For the farmhouse, the live return points cluster at the lead's door spot, and the marker matches the arrival within 0.03, as at Kamo (CONFIRMED_LIVE; private live logs, conclusions only). Members are still placed at a measured outside spot (`lan_story_remote_interior.c:282`, `:417`).
-- The 2026-10-14 take-along freeze (plan 4891-4911, CONFIRMED_LIVE once) is the only farmhouse take-along in the kept logs. At that point the split mask was empty: Tal, about 39 units from Ailish, had no lease. INFERENCE: the empty mask (`src/hooks/lan_story_runtime.c:1801-1835`, `src/hooks/lan_story_split.c:602-605`) chose the take-along, not the door trigger the plan supposes (HYPOTHESIS, plan 4905-4906).
+- **RETIRED (stage 1.1 decision 5):** the alleged 2026-10-14 farmhouse take-along misread its own host log. Tal remained outside and paused, and was placed on the lead only after exit. The empty split mask selected vanilla TEMP; vanilla temporary-zone entry is lead-only, not whole-party placement. See the corrected October 14 plan entry.
 - The client holds its own trigger dispatch and cluster scripts all session (`src/hooks/lan_story_client.c:28-32`, `:238-295`; CONFIRMED_STATIC), so it never switches room cameras (INFERENCE).
 - The castle Kamo writes story only at the castle start. Its exit sets block 1050 and starts the alarm only below block 1050, and its award advances 'Muster at the gates' only at quest stage 0. Later talks just open the shop. CONFIRMED_STATIC, GEX 0x5948F, 0x5BD76.
 - The other route interiors with merchants are two inns. Their rest charges 25 florins, heals the group and moves the player who rests. Traders and smiths stand outdoors (CONFIRMED_STATIC). No kept log shows a visit to any of them.
 
 **Smallest correct design.**
 1. A pure header lists the barred houses: LICa_Kamo_Shop with its door and NPC names. Do not call them excluded houses: that name is already taken (`src/hooks/lan_story_world.h:25`).
-2. Enforce the list inside door_for() and both keeper lookups. Leave the client's area-state follow unguarded (`:762-766`), because a native take-along needs it.
+2. Enforce the list inside door_for() and both keeper lookups. Leave the client's area-state follow unguarded (`:762-766`), for independently proved area following. **RETIRED rationale:** vanilla temporary-zone entry is lead-only; no native take-along requires this.
 3. Move doors[] into a pure header and extend the privacy test. A door-table test asserts: no barred name in any case, a door row for every keeper zone, NULL cameras allowed, and no lead-present-only admission while the lead is outside.
 4. Option A: a farmhouse row reachable only through the same-house-as-lead branch (`:583`). It needs min_block 1200 (≥), the marker, a measured outside spot and FrappeHallCam. The chest uses H1a, and D6 copies its loot once.
-5. Option B: retest first, logging the lease and the mask.
+5. **RETIRED Option B:** native take-along does not exist; vanilla temporary-zone entry is lead-only.
 6. Inn rows are data with walk-in visits. The rest becomes a host-applied request.
 
 **Open gates.**
 - G1 (live, A): Tal opens Boss_Chest_Mungo while Ailish is inside; one open, and the loot is copied once. Needs a save where the chest is still closed (UNKNOWN whether one is kept).
 - G2: does Tal's host body fire the host's triggers or the FARM_HOUSE writes? Close with a read-only hbreak on RVA 0xFD9C0 while Tal walks the porch alone.
-- G3 (live, B): retest, logging mask, lease and distance.
+- G3 (former live gate B): **RETIRED** with the native take-along premise; vanilla TEMP is lead-only.
 - G4 (live): each new row's arrival and outside spot.
 
 **Owner decisions.**
-- First chest gate. A: remote farmhouse entry, amending D11. B: native take-along. C: accept E3_NB_ShdCamp.
+- First chest gate. A: remote farmhouse entry, amending D11. B: **RETIRED**; vanilla temporary-zone entry is lead-only. C: accept E3_NB_ShdCamp.
 - If A: lead inside only, or solo? Room cameras?
 - Which inns join, and is a walk-in visit enough? Who pays for a rest, whom it heals, and what becomes of receipt item 708?
 - Should the outdoor merchants become per-player shops, and in which D12 stage?
 - Castle Kamo: barred for good, or only while its writes can run? Should the host's Kamo talk stay public? No plan record names this exclusion.
-- A take-along into a barred house: evict the member, or let the client follow?
+- **RETIRED question:** a native take-along into a barred house; vanilla temporary-zone entry is lead-only. A future explicit member-entry path needs its own decision.
 
 **Depends on.** H1a; H1b (shared module: coordinate edits); #82, #83, #85, #86; D6/D9; D12 S1/S3/S4; NG; Phase I.
 
-**Route relevance and effort.** The acceptance route needs no chest and no shop. In NG the castle Kamo writes come before Ailish joins (INFERENCE), so barring it is a small guard. Option A is medium, solo entry large, option B medium (cause unproven), option C none. Inn rows are small; inn services are medium to large.
+**Route relevance and effort.** The acceptance route needs no chest and no shop. In NG the castle Kamo writes come before Ailish joins (INFERENCE), so barring it is a small guard. Option A is medium, solo entry large, option B retired (incorrect native take-along premise), option C none. Inn rows are small; inn services are medium to large.
 
 ### S0priv — D12 S0: keep the host's conversations private beyond shopkeepers
 
@@ -1144,7 +1154,7 @@ Never hook inside the hashed bodies of 0x423F60/0x424060.
 
 **Depends on.** The E2 departure change, committed in 9081425. `docs/coop-story-plan-54.md:6762` still records it as CONFIRMED_TEST with the live check pending; its live run can double as the D1 check. Also: the single emitter adapter, agreed file ownership, #63, #62, the #55 rule, and D7/E3.
 
-**Route relevance and effort.** Low. On the tested fights, every authored-effect death reaches the client, and ordinary deaths show the host's clip. Still open: 5b14180b near the farmhouse, which the route visits (`docs/coop-story-plan-54.md:6794`), and at the gazebo, where route membership is UNKNOWN. Effort: docs under an hour; step 3 with tests about half a day; G1 and G2 one short owner session each.
+**Route relevance and effort.** Low. On the tested fights, every authored-effect death reaches the client, and ordinary deaths show the host's clip. Still open: 5b14180b near the farmhouse, whose old route citation (`docs/coop-story-plan-54.md:6794`) was retired by B6 and does not establish the current route, and at the gazebo, where route membership is UNKNOWN. Effort: docs under an hour; step 3 with tests about half a day; G1 and G2 one short owner session each.
 
 ### creep88 — #88 idle creep, static side: native writers and the anchor seam
 
@@ -1367,7 +1377,7 @@ The conclusion, that this run bears on the root cause (G7), does not depend on t
 
 - Overclaim: 'none of the files this item touches are dirty' hid that lan_story_runtime.c and the plan were dirty (review at d437693). → Moot at HEAD 9081425: the tree is clean apart from the untracked research doc. All citations were re-pinned at HEAD; the runtime.c lines moved by +6 to +36 (house camera 742-751, HP mirror 775-781, split mask 1801-1835 and 2111-2116), and the §10 H row is plan 6798. The AGENTS.md coordination rule for the shared runtime and remote-interior modules still applies and is listed under dependencies.
 - Overclaim: 'Kamo needed the camera in its row, which suggests the client's house scripts do not run' has no plan or source evidence either way. → The review is wrong about the evidence. src/hooks/lan_story_client.c installs holds on the trigger sweep (RVA 0xCFD0 via 0x3373F), the trigger dispatch (RVA 0xC6E0 via 0x77E24) and cluster entry/exit script submission (0x3543F, 0x35527), from the client's pause acquisition until native exit (:28-32, :238-295, :715-742, :1451-1453). src/hooks/lan_story_client_camera.c:254-256 also states that the client holds cluster scripts. The hooks are now CONFIRMED_STATIC. That the farmhouse room cameras never switch on the client stays INFERENCE: the kept client logs show no cluster_script_held line. The draft's G2 RVAs (0x123D30, 0xD330) were not re-checked and are replaced by the cited hooks.
-- Missing: a take-along into the castle Kamo is possible whenever the mask is empty, for example with the NG seat-locked spectator at the castle start. → The general point stands (an empty mask leads to the native whole-party entry; INFERENCE from the 2026-10-14 log) and is kept as O7 and a design rule. The example is weak. At the NG castle start the party is Tal alone, and the client's seat is locked to Ailish, who has not joined yet (plan 70-75), so there is no member body to take along. On later castle visits the castle Kamo's writes no longer fire: block past 1050 and quest stage past 0 (CONFIRMED_STATIC gating; the block value is INFERENCE).
+- **RETIRED (stage 1.1):** the empty-mask/native-whole-party inference in this review depended on the misread 2026-10-14 farmhouse log. Vanilla temporary-zone entry is lead-only. The native path can still replace the observer epoch; it does not place followers inside.
 - Review line references: remote_interior.c:580 (same-house filter), :585-586 (lead-near refusal), :716 (client admission), and the §10 row at plan 6788. → Re-pinned at HEAD 9081425: the one-house and lead filter is :583, the lead-near refusal :588-591 (client :725), the client admission starts at :711, and the §10 H row is plan 6798. The substance of each point was confirmed.
 - Overclaim: many GEX details were accepted only on the draft's word. → Partly closed in this fold, by disassembling the owner's own GEX. Now CONFIRMED_STATIC:
 - NPC_Innkeeper_Talking (0x7F647-0x7F8BF: 25 florins, fade, GEN_InnHeal, PopToNamedLocation to STAIRS_AILOC);
@@ -1520,7 +1530,7 @@ Whether slot 8(1) destroys the object for other classes is UNKNOWN and does not 
 - Missing: lan_story_world.c is dirty (M) and belongs in the file-ownership list. → Stale at HEAD 9081425: the worktree is clean because the E2 work was committed. lan_story_world.c stays in the coordination list as a shared module that carries the consumer chain (1471-1474, 2805-2811, 2970-2977), not as a dirty file. The draft's 'dirty d437693', 'story_death_visual.h is dirty' and 'spirit visual host being edited' were corrected the same way.
 - Missing: name build ids 5cfbd199 (10-13 212033Z run) and ac1f23ae so that 'runs built with it' can be checked. → Applied at a lower evidence level. The logs carry no build identity (only the game SHA-256 and the module base). Which build each run used rests on docs/coop-story-plan-54.md:4440, :4450, :4469 and on log dates against ff94f5a (2026-10-14), where both logs first enter tracked source: INFERENCE.
 - Overclaim: an attached effect from RVA 0xBCE90 probably passes fx_exact, because both creation paths write the same offsets. → Not settled. The attached factory (RVA 0x18C90 via 0x18140) and the independent one (RVA 0x18A80 via 0x18300) share helpers 0x17EB0 and 0x18830, and both get the same post-creation writes in RVA 0xE2810. The class each one writes was not traced. Kept as UNKNOWN, with INFERENCE that it probably passes. The proposed first-gate line would show which.
-- Missing (G2 owner decision): the 12 unexplained 5b14180b misses are 'near the farmhouse, a location on the #54 route per status-matrix rows 88-89'. → Corrected. Rows 88-89 describe the farmhouse spawn work, not route membership. The 12 split into 7 in HC_NW_Farm_Random and 5 in HC_SE_Gazebo_Random. That the route visits the farmhouse is cited from docs/coop-story-plan-54.md:6794 (the D6 farmhouse sword chest). Whether the route passes the gazebo is UNKNOWN. The owner decision was added as stated.
+- Missing (G2 owner decision): the 12 unexplained 5b14180b misses are 'near the farmhouse, a location on the #54 route per status-matrix rows 88-89'. → Corrected. Rows 88-89 describe the farmhouse spawn work, not route membership. The 12 split into 7 in HC_NW_Farm_Random and 5 in HC_SE_Gazebo_Random. That historical route citation, docs/coop-story-plan-54.md:6794 (the D6 farmhouse sword chest), was removed by B6; it does not establish the current route. Whether the route passes the gazebo is UNKNOWN. The owner decision was added as stated.
 - Overclaim: the cited clip script does not show '51/51 after death', and the method is weak (the host's first dead clip is sometimes a hit clip). → Re-verified with a stricter join: a client sample after the host's first dead sample must carry a clip that the host showed only while dead. Result: 51/51, with 8 unsampled. The host's per-actor sample interval has a median of 264 ms (about 4 Hz, not 1 Hz). Stated as clip-id equality at discrete samples, not visual equality.
 - Not in the review: whether the emitter has other silent NULL paths besides the action entry and the 0xC0 queue. → Added as a fact during the fold. At RVA 0xE2980-0xE29B2, creation needs actor+0x44 → +0xB4 → +8 → renderer +0x14 to exist, and its slot-6 call (vtable 0x2DF8EC, RVA 0x21BC80, a field read through renderer+8 → +0x1C → +0x14) to return nonzero. Otherwise *out is NULL. CONFIRMED_STATIC; what the field means is UNKNOWN. It is one more reason why a missing refused line does not prove a death had no effect.
 

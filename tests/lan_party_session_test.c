@@ -1,5 +1,6 @@
 #include "network/lan_party_session.h"
 #include "network/lan_story_world_frame.h"
+#include "network/lan_story_catchup.h"
 #include "network/lan_party_replica.h"
 #include "network/lan_party_motion.h"
 #include "hooks/lan_party_presence.h"
@@ -722,7 +723,12 @@ static void test_old_story_movement_profile(void) {
     SudekiMpLanPartyPoll(host,GetTickCount());
     CHECK(raw_read(sock,bytes,&source)==RAW_HEADER+9);
     CHECK(bytes[6]==RAW_REJECT && bytes[RAW_HEADER+8]==SUDEKIMP_LAN_ARENA_REJECT_MAP);
-    hello[44]=27;
+    hello[44]=27; /* World version 12 / 64 actors: incompatible with profile 28. */
+    raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
+    SudekiMpLanPartyPoll(host,GetTickCount());
+    CHECK(raw_read(sock,bytes,&source)==RAW_HEADER+9);
+    CHECK(bytes[6]==RAW_REJECT && bytes[RAW_HEADER+8]==SUDEKIMP_LAN_ARENA_REJECT_MAP);
+    hello[44]=28;
     raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
     SudekiMpLanPartyPoll(host,GetTickCount()); (void)raw_read(sock,bytes,&source);
     CHECK(bytes[6]==RAW_ACK);
@@ -1542,11 +1548,15 @@ static void test_monster_display_wire(void) {
     uint8_t bytes[SUDEKIMP_LAN_STORY_WORLD_CHUNK_MAX_SIZE]; size_t size=0;
     SudekiMpLanStoryWorldChunk out;
     CHECK(SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
-    CHECK(size==172u && bytes[3]==12u);
+    CHECK(size==172u && bytes[3]==SUDEKIMP_LAN_STORY_WORLD_VERSION);
     CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
     CHECK(out.actors[0].visual_flags==SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE);
     CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size-1u,&out));
-    bytes[3]=11u; CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out)); bytes[3]=12u;
+    bytes[3]=SUDEKIMP_LAN_STORY_WORLD_VERSION-1u;
+    CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
+    bytes[3]=SUDEKIMP_LAN_STORY_WORLD_VERSION+1u;
+    CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
+    bytes[3]=SUDEKIMP_LAN_STORY_WORLD_VERSION;
     bytes[31]=SUDEKIMP_LAN_STORY_WORLD_HIDDEN;
     CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
     for(unsigned style=0;style<=7;++style) {
@@ -1611,12 +1621,207 @@ static void test_monster_display_wire(void) {
     CHECK(SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
     CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out) && out.actors[0].kind==SUDEKIMP_LAN_STORY_WORLD_ALLY_KIND &&
         out.actors[0].hit_points==250.0f && out.actors[0].visual_flags==a->visual_flags);
-    bytes[3]=11u; CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out)); bytes[3]=12u;
+    bytes[3]=SUDEKIMP_LAN_STORY_WORLD_VERSION-1u;
+    CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
+    bytes[3]=SUDEKIMP_LAN_STORY_WORLD_VERSION;
     a->visual_flags=SUDEKIMP_LAN_STORY_WORLD_ALPHA; a->alpha=0x80u;
     CHECK(!SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
     a->visual_flags=0; a->alpha=0; a->hit_points=-1.0f;
     CHECK(!SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
     a->kind=SUDEKIMP_LAN_STORY_WORLD_CHEST_KIND; a->hit_points=0;
+}
+
+static void fill_large_world(SudekiMpLanStoryWorldFrame *world,BOOL party) {
+    memset(world,0,sizeof(*world));
+    world->epoch=world->revision=world->sequence=1;
+    world->host_tick=100;
+    world->count=SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS;
+    for(unsigned i=0;i<world->count;++i) {
+        SudekiMpLanStoryWorldActor *a=&world->actors[i];
+        a->kind=i==0u && party?SUDEKIMP_LAN_STORY_WORLD_PC_KIND:SUDEKIMP_LAN_STORY_WORLD_NPC_KIND;
+        a->identifier=i==0u && party?SudekiMpLanStoryWorldCharacterIdentifier(0):1000u+i;
+        a->generation=a->animation_sequence=a->submodels=a->bank_fingerprint=1;
+        a->forward[2]=1.0f;
+        a->position[0]=(float)i;
+    }
+    CHECK(SudekiMpLanStoryWorldFrameValid(world));
+}
+void test_large_story_world_reassembly(const SudekiMpLanStoryWorldFrame *frame);
+static void test_large_story_world_wire(void) {
+    SudekiMpLanStoryWorldFrame frame,decoded;
+    fill_large_world(&frame,FALSE);
+    CHECK(SudekiMpLanStoryWorldChunkCount(frame.count)==16u);
+    CHECK(SudekiMpLanStoryWorldChunkCount(129u)==0u);
+    memset(&decoded,0,sizeof(decoded));
+    decoded.epoch=frame.epoch;decoded.revision=frame.revision;
+    decoded.sequence=frame.sequence;decoded.host_tick=frame.host_tick;decoded.count=frame.count;
+    for(unsigned i=0;i<16u;++i) {
+        uint8_t bytes[SUDEKIMP_LAN_STORY_WORLD_CHUNK_MAX_SIZE];size_t size=0;
+        SudekiMpLanStoryWorldChunk chunk;
+        CHECK(SudekiMpLanStoryWorldChunkEncode(&frame,i,bytes,sizeof(bytes),&size));
+        CHECK(size<=SUDEKIMP_LAN_STORY_WORLD_CHUNK_MAX_SIZE);
+        CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&chunk));
+        CHECK(chunk.index==i && chunk.chunks==16u && chunk.total==128u && chunk.count==8u);
+        memcpy(decoded.actors+i*8u,chunk.actors,8u*sizeof(chunk.actors[0]));
+        bytes[3]=SUDEKIMP_LAN_STORY_WORLD_VERSION-1u;
+        CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&chunk));
+        bytes[3]=SUDEKIMP_LAN_STORY_WORLD_VERSION+1u;
+        CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&chunk));
+    }
+    CHECK(SudekiMpLanStoryWorldFrameValid(&decoded));
+    for(unsigned i=0;i<128u;++i)
+        CHECK(decoded.actors[i].identifier==frame.actors[i].identifier);
+    fill_large_world(&frame,TRUE);
+    test_large_story_world_reassembly(&frame);
+    struct OversizeWorld { SudekiMpLanStoryWorldFrame frame; SudekiMpLanStoryWorldActor extra; } oversized;
+    _Static_assert(offsetof(struct OversizeWorld,extra)==offsetof(SudekiMpLanStoryWorldFrame,actors)+
+        SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS*sizeof(SudekiMpLanStoryWorldActor),
+        "Extra actor must occupy the first out-of-capacity slot");
+    oversized.frame=frame;oversized.extra=frame.actors[127];++oversized.extra.identifier;
+    oversized.frame.count=129u;
+    CHECK(SudekiMpLanStoryWorldActorValid(&oversized.extra));
+    CHECK(!SudekiMpLanStoryWorldFrameValid(&oversized.frame));
+}
+static void check_world_actor(const SudekiMpLanStoryWorldActor *a,const SudekiMpLanStoryWorldActor *b) {
+    CHECK(a->kind==b->kind);
+    CHECK(a->submodels==b->submodels);
+    CHECK(a->visual_flags==b->visual_flags);
+    CHECK(a->identifier==b->identifier);
+    CHECK(a->generation==b->generation);
+    CHECK(a->animation_sequence==b->animation_sequence);
+    CHECK(a->bank_fingerprint==b->bank_fingerprint);
+    CHECK(a->hit_points==b->hit_points);
+    CHECK(a->alpha==b->alpha);
+    for(unsigned i=0;i<3u;++i) {
+        CHECK(a->position[i]==b->position[i]);
+        CHECK(a->forward[i]==b->forward[i]);
+    }
+    for(unsigned i=0;i<5u;++i) {
+        CHECK(a->clip[i]==b->clip[i]);
+        CHECK(a->clip_occurrence[i]==b->clip_occurrence[i]);
+        CHECK(a->state[i]==b->state[i]);
+        CHECK(a->rate[i]==b->rate[i]);
+        CHECK(a->time[i]==b->time[i]);
+    }
+    for(unsigned i=0;i<4u;++i) {
+        CHECK(a->blend[i]==b->blend[i]);
+    }
+}
+static void check_scene(const SudekiMpLanStoryScene *a,const SudekiMpLanStoryScene *b) {
+    CHECK(a->epoch==b->epoch);
+    CHECK(a->revision==b->revision);
+    CHECK(a->observed_tick==b->observed_tick);
+    CHECK(a->phase==b->phase);
+    CHECK(a->available_mask==b->available_mask);
+    CHECK(a->leader_seat==b->leader_seat);
+    CHECK(a->inside_mask==b->inside_mask);
+    CHECK(a->exterior_retained==b->exterior_retained);
+    CHECK(!strcmp(a->world,b->world) && !strcmp(a->temporary,b->temporary));
+}
+static void check_party_actor(const SudekiMpLanStoryActor *a,const SudekiMpLanStoryActor *b) {
+    CHECK(a->generation==b->generation);
+    CHECK(a->character==b->character);
+    CHECK(a->animation_state==b->animation_state);
+    CHECK(a->weapon_item_plus_one==b->weapon_item_plus_one);
+    CHECK(a->weapon_visible==b->weapon_visible);
+    CHECK(a->native_pose==b->native_pose);
+    CHECK(a->armour_item_plus_one==b->armour_item_plus_one);
+    CHECK(a->use_hint==b->use_hint);
+    CHECK(a->combo_hud==b->combo_hud);
+    CHECK(a->hp==b->hp);
+    CHECK(a->sp==b->sp);
+    CHECK(a->x==b->x);
+    CHECK(a->y==b->y);
+    CHECK(a->z==b->z);
+    CHECK(a->facing_x==b->facing_x);
+    CHECK(a->facing_z==b->facing_z);
+    CHECK(a->locomotion.valid==b->locomotion.valid);
+    CHECK(a->locomotion.sequence==b->locomotion.sequence);
+    CHECK(a->shots.latest==b->shots.latest);
+    CHECK(a->shots.count==b->shots.count);
+    for(unsigned i=0;i<2u;++i) {
+        CHECK(a->weapon_attachment[i]==b->weapon_attachment[i]);
+    }
+    for(unsigned i=0;i<4u;++i) {
+        CHECK(a->locomotion.clip[i]==b->locomotion.clip[i]);
+        CHECK(a->locomotion.state[i]==b->locomotion.state[i]);
+        CHECK(a->locomotion.rate[i]==b->locomotion.rate[i]);
+        CHECK(a->locomotion.time[i]==b->locomotion.time[i]);
+    }
+    for(unsigned i=0;i<3u;++i) {
+        CHECK(a->locomotion.blend[i]==b->locomotion.blend[i]);
+    }
+    for(unsigned i=0;i<SUDEKIMP_LAN_STORY_SHOT_HISTORY;++i) {
+        const SudekiMpLanStoryShot *x=&a->shots.events[i],*y=&b->shots.events[i];
+        CHECK(x->sequence==y->sequence && x->host_tick==y->host_tick && x->item==y->item && x->pre_charge_q8==y->pre_charge_q8);
+        for(unsigned j=0;j<3;++j)CHECK(x->origin[j]==y->origin[j] && x->direction[j]==y->direction[j]);
+    }
+}
+static void check_party_frame(const SudekiMpLanStoryFrame *a,const SudekiMpLanStoryFrame *b) {
+    CHECK(a->epoch==b->epoch);
+    CHECK(a->revision==b->revision);
+    CHECK(a->host_tick==b->host_tick);
+    CHECK(a->sequence==b->sequence);
+    CHECK(a->available_mask==b->available_mask);
+    CHECK(a->leader_character==b->leader_character);
+    CHECK(a->combat_mode==b->combat_mode);
+    CHECK(a->view.valid==b->view.valid);
+    CHECK(a->view.camera_serial==b->view.camera_serial);
+    for(unsigned i=0;i<16u;++i) {
+        CHECK(a->view.matrix[i]==b->view.matrix[i]);
+    }
+    for(unsigned i=0;i<3u;++i) {
+        CHECK(a->view.projection[i]==b->view.projection[i]);
+    }
+    for(unsigned i=0;i<4;++i)check_party_actor(&a->actors[i],&b->actors[i]);
+}
+static void test_large_story_catchup(void) {
+    SudekiMpLanStoryCatchup snapshot={0},decoded={0};
+    static uint8_t bytes[SUDEKIMP_STORY_CATCHUP_MAX_SIZE];
+    snapshot.transaction=0x1234abcdu;
+    snapshot.target=(SudekiMpLanStoryScene){.epoch=1,.revision=1,.phase=SUDEKIMP_LAN_STORY_READY,
+        .available_mask=1,.leader_seat=0,.world="capacity_fixture"};
+    snapshot.seed_scene=snapshot.target;
+    snapshot.party=(SudekiMpLanStoryFrame){.epoch=1,.revision=1,.sequence=1,.host_tick=100,
+        .available_mask=1,.leader_character=0};
+    snapshot.party.actors[0]=(SudekiMpLanStoryActor){.generation=1,.character=0,
+        .native_pose=1,.hp=100,.sp=100,.facing_z=1};
+    snapshot.party.view=(SudekiMpLanStoryView){.valid=1,.camera_serial=1,
+        .matrix={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1},.projection={1,.1f,1000}};
+    fill_large_world(&snapshot.world,TRUE);
+    for(unsigned i=1;i<snapshot.world.count;++i) {
+        SudekiMpLanStoryWorldActor *a=&snapshot.world.actors[i];
+        a->position[1]=(float)i*.25f;a->position[2]=-(float)i;
+        a->generation=100+i;a->animation_sequence=200+i;a->bank_fingerprint=UINT64_C(0x1234567800000000)+i;
+        a->submodels=1u+i%31u;
+        for(unsigned c=0;c<4;++c) {
+            a->clip[c]=1000+i*4+c;a->clip_occurrence[c]=i;a->state[c]=1;
+            a->rate[c]=1.0f+c*.25f;a->time[c]=(float)i+c*.5f;
+        }
+        a->blend[0]=.25f;a->blend[1]=.5f;a->blend[2]=.75f;
+    }
+    size_t size=0;
+    CHECK(SudekiMpLanStoryCatchupValid(&snapshot));
+    CHECK(SudekiMpLanStoryCatchupEncode(&snapshot,bytes,sizeof(bytes),&size));
+    CHECK(size<=SUDEKIMP_STORY_CATCHUP_MAX_SIZE);
+    CHECK((size+SUDEKIMP_STORY_CATCHUP_FRAGMENT_SIZE-1u)/SUDEKIMP_STORY_CATCHUP_FRAGMENT_SIZE<=20u);
+    CHECK(SudekiMpLanStoryCatchupDecode(bytes,size,&decoded));
+    CHECK(decoded.transaction==snapshot.transaction);
+    CHECK(decoded.recruitment.route==snapshot.recruitment.route);
+    CHECK(decoded.recruitment.transaction==snapshot.recruitment.transaction);
+    CHECK(decoded.recruitment.before_epoch==snapshot.recruitment.before_epoch);
+    CHECK(decoded.recruitment.before_revision==snapshot.recruitment.before_revision);
+    CHECK(decoded.recruitment.after_epoch==snapshot.recruitment.after_epoch);
+    CHECK(decoded.recruitment.after_revision==snapshot.recruitment.after_revision);
+    CHECK(decoded.recruitment.actor_generation==snapshot.recruitment.actor_generation);
+    CHECK(decoded.recruitment.observed_tick==snapshot.recruitment.observed_tick);
+    check_scene(&decoded.target,&snapshot.target);check_scene(&decoded.seed_scene,&snapshot.seed_scene);
+    check_party_frame(&decoded.party,&snapshot.party);
+    CHECK(decoded.world.epoch==snapshot.world.epoch && decoded.world.revision==snapshot.world.revision &&
+        decoded.world.host_tick==snapshot.world.host_tick && decoded.world.sequence==snapshot.world.sequence &&
+        decoded.world.count==snapshot.world.count);
+    for(unsigned i=0;i<snapshot.world.count;++i)check_world_actor(&decoded.world.actors[i],&snapshot.world.actors[i]);
+    CHECK(!SudekiMpLanStoryCatchupDecode(bytes,size-1u,&decoded));
 }
 
 static void test_story_command_allowlist(void) {
@@ -1632,6 +1837,8 @@ static void test_story_command_allowlist(void) {
 }
 int main(void) {
     test_monster_display_wire();
+    test_large_story_world_wire();
+    test_large_story_catchup();
     SudekiMpLanStoryView missing_host_view={0};
     CHECK(!SudekiMpLanStoryViewUsable(&missing_host_view,FALSE));
     CHECK(SudekiMpLanStoryViewUsable(&missing_host_view,TRUE));

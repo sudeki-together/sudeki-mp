@@ -21,7 +21,12 @@ BOOL SudekiMpLanStorySplitInstall(HMODULE);
 BOOL SudekiMpLanStorySplitUninstall(void);
 /* Host runtime, once per native dispatch. outside_mask: characters that may
  * stay outside (remote-controlled, currently held by their players). */
-void SudekiMpLanStorySplitSetEligibility(BOOL host_ready,uint8_t outside_mask);
+void SudekiMpLanStorySplitSetEligibility(BOOL host_ready,uint8_t outside_mask,uint8_t away_mask);
+/* Native-thread door parking: retain native pause/hide until a proved return.
+ * Unpark removes only lead-only's references; Park restores those references. */
+BOOL SudekiMpLanStorySplitMemberParked(unsigned character);
+BOOL SudekiMpLanStorySplitUnparkMember(unsigned character);
+BOOL SudekiMpLanStorySplitParkMember(unsigned character);
 BOOL SudekiMpLanStorySplitActive(void);
 struct SudekiMpLanStoryNativeRoster;
 /* Read-only proof for an already leased exterior follower while the host is

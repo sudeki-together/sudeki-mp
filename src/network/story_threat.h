@@ -52,7 +52,8 @@ int SudekiMpStoryThreatCapOnly(int melee_cap,int ranged_cap,unsigned melee,unsig
 /* Higher tiers use HP-fraction memory: x * 2^(-elapsed_ms/(half_life*1000)).
  * Pick alone weights by 1/(1+d/d0); its floor at d0 costs twice the HP fraction.
  * Decisions 10/11: only HOST/REMOTE may be named above tier0; one active alert
- * per shooter per set, including orphan copies. Responders compare raw threat
+ * per shooter per set, including orphan copies. AI/AWAY bodies remain reachable
+ * only through the tier 0b lead branch (Decide (d)). Responders compare raw threat
  * (ties qualify), ranged first; the combined count is clamped to 3 even though
  * each ini count accepts 32. Explicit flags make tick 0 valid; deadlines and
  * sequence ordering are wrap-safe. No function derives level from config.
@@ -109,6 +110,8 @@ typedef struct SudekiMpStoryThreatResponderView {
     SudekiMpStoryThreatRecord *record; /* call-local view only; never retained */
     int close,listed;
 } SudekiMpStoryThreatResponderView;
+/* A zero group id is unknown, including when both ids are zero. */
+int SudekiMpStoryThreatSameGroup(uint32_t a,uint32_t b);
 int SudekiMpStoryThreatSubstitutable(const SudekiMpStoryThreatRecord *record);
 int SudekiMpStoryThreatShooterListed(const SudekiMpStoryThreatConfig *config,
     const SudekiMpStoryThreatRecord *record,unsigned shooter,uint32_t now);

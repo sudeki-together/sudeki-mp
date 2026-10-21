@@ -79,6 +79,7 @@ static BOOL ready(const SudekiMpLanPartyLease *key, void *actor,
     return ready_now && key->seat == actor_index(actor) &&
         SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
 }
+static BOOL arrival_native_ai;
 static void acquire_stub(void *slot) {
     unsigned int i = actor_index(*(void **)slot);
     ++acquire_calls[i];
@@ -90,7 +91,8 @@ static void release_stub(void *slot) {
     ++release_calls[i];
     if (no_release) return;
     --*(int16_t *)(ai[i]+0x16a);
-    modes[i][0xb] = wrong_release_mode ? 0 : 1;
+    BOOL lead=arrival_native_ai && *(void **)(controller+0x248)==actors[i];
+    modes[i][0xb] = wrong_release_mode ? (lead?1:0) : (lead?0:1);
 }
 static void __attribute__((stdcall)) movement_stub(
     void *arbiter, const float *direction, float speed, float turn, uint32_t mode) {
@@ -313,8 +315,16 @@ static void rebind_fixture(const SudekiMpControlUpdateDispatchWitness *w) {
     CHECK(!SudekiMpLanPartyControlMenuInputExact(actors[0]));
     CHECK(!SudekiMpLanPartyControlLocalSwitchReady(w,&old));
 }
+static BOOL guard_watch,guard_allow=TRUE;
+static unsigned guard_calls,guard_original,guard_posts;
+static BOOL fixture_input_guard(void *c) {
+    CHECK(c==controller);++guard_calls;
+    CHECK(!SudekiMpControlSeparationStoryInputGuard(NULL)); /* callback in flight */
+    *(int *)(controller+0x80)=0;return guard_allow;
+}
 static void __attribute__((thiscall)) original_stub(void *c, void *d) {
     (void)c; (void)d;
+    if(guard_watch) {++guard_original;CHECK(*(int *)(controller+0x80)==0);}
 }
 static BOOL move(const SudekiMpControlUpdateDispatchWitness *w, unsigned int seat) {
     return SudekiMpLanPartyControlMove(w,&leases[seat],actors[seat],0,1,0,1,TRUE);
@@ -325,6 +335,91 @@ static const SudekiMpLanStoryNativeRoster *story_fixture_roster;
 BOOL SudekiMpStoryEpochFixtureRosterExact(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r) {
     return r && r==story_fixture_roster && SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
+}
+static void story_arrival_leases(const SudekiMpControlUpdateDispatchWitness *w) {
+    uint8_t saved_modes[4];for(unsigned c=0;c<4;++c) saved_modes[c]=modes[c][0xb];
+    arrival_native_ai=TRUE;
+    void *saved_world=*(void **)(image_base+0x408d10u);*(void **)(image_base+0x408d10u)=group;
+    SudekiMpLanStoryNativeRoster r={.epoch=40,.revision=40,.available_mask=12,.leader_character=3,
+        .world=group,.descriptor=group,.group=group,.controller=controller};
+    void *vt2=*(void **)actors[2];
+    *(void **)actors[2]=image_base+0x2d5010u;
+    for(unsigned c=2;c<4;++c) {r.actors[c]=actors[c];r.ai[c]=ai[c];}
+    set_present(12);*(void **)(controller+0x248)=actors[3];modes[3][0xb]=0;modes[2][0xb]=1;
+    story_fixture_roster=&r;
+    SudekiMpLanPartyLease connection={.token=1234,.generation=2,.seat=1},key,next;
+    CHECK(!SudekiMpLanPartyControlStoryLeadScope(&escaped,&r,TRUE));
+    CHECK(SudekiMpLanPartyControlStoryLeadScope(w,&r,TRUE));
+    CHECK(SudekiMpLanPartyControlStoryBegin(w,&r));
+    CHECK(SudekiMpLanPartyControlStoryNextLease(w,&connection,2,&key));
+    CHECK(SudekiMpLanPartyControlStoryAcquire(w,&r,&key,ready));
+    /* SetLead can precede RemovePC. Release is allowed in this intermediate
+     * pair, but acquiring a new lead lease waits for the singleton scene. */
+    r.leader_character=2;*(void **)(controller+0x248)=actors[2];++r.epoch;++r.revision;
+    CHECK(SudekiMpLanPartyControlStoryLeadScope(w,&r,TRUE));
+    CHECK(!SudekiMpLanPartyControlStoryExact(w,&r,&key));
+    CHECK(SudekiMpLanPartyControlStoryDrain(w,&r,&key,ready));
+    CHECK(modes[2][0xb]==0 && !*(int16_t *)(ai[2]+0x16a));
+    CHECK(SudekiMpLanPartyControlStoryBegin(w,&r));
+    CHECK(SudekiMpLanPartyControlStoryNextLease(w,&connection,2,&next));
+    CHECK(!SudekiMpLanPartyControlStoryAcquire(w,&r,&next,ready));
+    /* Return to the fixture's pair to separately test a direct solo edge. */
+    r.leader_character=3;*(void **)(controller+0x248)=actors[3];modes[2][0xb]=1;++r.epoch;++r.revision;
+    CHECK(SudekiMpLanPartyControlStoryLeadScope(w,&r,TRUE));
+    CHECK(SudekiMpLanPartyControlStoryBegin(w,&r));
+    CHECK(SudekiMpLanPartyControlStoryNextLease(w,&connection,2,&key));
+    CHECK(SudekiMpLanPartyControlStoryAcquire(w,&r,&key,ready));
+    /* Native removal sends existing remote Tal to the lead. Only release
+     * may cross the epoch/lead change, preserving exact Tal/AI identity. */
+    set_present(4);r.available_mask=4;r.leader_character=2;r.actors[3]=r.ai[3]=NULL;
+    ++r.epoch;++r.revision;*(void **)(controller+0x248)=actors[2];
+    CHECK(!SudekiMpLanPartyControlStoryExact(w,&r,&key));
+    CHECK(SudekiMpLanPartyControlStoryLeadScope(w,&r,TRUE));
+    ready_now=FALSE;CHECK(!SudekiMpLanPartyControlStoryDrain(w,&r,&key,ready));
+    CHECK(!SudekiMpLanPartyControlStoryLeadScope(w,NULL,FALSE));
+    ready_now=TRUE;CHECK(SudekiMpLanPartyControlStoryDrain(w,&r,&key,ready));
+    CHECK(*(int16_t *)(ai[2]+0x16a)==0 && modes[2][0xb]==0);
+    CHECK(SudekiMpLanPartyControlStoryBegin(w,&r));
+    CHECK(SudekiMpLanPartyControlStoryNextLease(w,&connection,2,&next));
+    CHECK(next.generation>key.generation);
+    CHECK(SudekiMpLanPartyControlStoryAcquire(w,&r,&next,ready));
+    CHECK(SudekiMpLanPartyControlStoryExact(w,&r,&next));
+    /* Whole-world/load drain also understands a native lead's released mode. */
+    ready_now=FALSE;CHECK(!SudekiMpLanPartyControlStoryLoadDrain(w,&next,ready));
+    ready_now=TRUE;CHECK(SudekiMpLanPartyControlStoryLoadDrain(w,&next,ready));
+    CHECK(modes[2][0xb]==0 && !*(int16_t *)(ai[2]+0x16a));
+    CHECK(SudekiMpLanPartyControlStoryNextLease(w,&connection,2,&next));
+    CHECK(SudekiMpLanPartyControlStoryAcquire(w,&r,&next,ready));
+    /* Disconnect drains the lead to native host input; rejoin gets a new key. */
+    CHECK(SudekiMpLanPartyControlStoryDrain(w,&r,&next,ready));
+    CHECK(modes[2][0xb]==0 && !*(int16_t *)(ai[2]+0x16a));
+    connection.token=1235;++connection.generation;
+    CHECK(SudekiMpLanPartyControlStoryNextLease(w,&connection,2,&key));
+    CHECK(key.generation>next.generation && SudekiMpLanPartyControlStoryAcquire(w,&r,&key,ready));
+    CHECK(!SudekiMpLanPartyControlStoryExact(w,&r,&next));
+    /* Reverse rotates to Ailish and drains Tal as an ordinary companion. */
+    set_present(12);r.available_mask=12;r.leader_character=3;r.actors[3]=actors[3];r.ai[3]=ai[3];
+    ++r.epoch;++r.revision;*(void **)(controller+0x248)=actors[3];
+    CHECK(SudekiMpLanPartyControlStoryLeadScope(w,&r,TRUE));
+    CHECK(SudekiMpLanPartyControlStoryDrain(w,&r,&key,ready));
+    CHECK(modes[2][0xb]==1 && !*(int16_t *)(ai[2]+0x16a));
+    CHECK(SudekiMpLanPartyControlStoryBegin(w,&r));
+    CHECK(SudekiMpLanPartyControlStoryNextLease(w,&connection,2,&next));
+    CHECK(SudekiMpLanPartyControlStoryAcquire(w,&r,&next,ready));
+    CHECK(SudekiMpLanPartyControlStoryDrain(w,&r,&next,ready));
+    CHECK(SudekiMpLanPartyControlStoryEnd());
+    /* Off refuses acquiring the native lead even with a fresh key. */
+    set_present(4);r.available_mask=4;r.leader_character=2;r.actors[3]=r.ai[3]=NULL;
+    *(void **)(controller+0x248)=actors[2];modes[2][0xb]=0;++r.epoch;
+    CHECK(SudekiMpLanPartyControlStoryBegin(w,&r));
+    CHECK(SudekiMpLanPartyControlStoryNextLease(w,&connection,2,&key));
+    CHECK(!SudekiMpLanPartyControlStoryAcquire(w,&r,&key,ready));
+    CHECK(SudekiMpLanPartyControlStoryEnd());
+    set_present(15);*(void **)(controller+0x248)=actors[0];modes[0][0xb]=0;modes[2][0xb]=modes[3][0xb]=1;
+    *(void **)actors[2]=vt2;arrival_native_ai=FALSE;
+    *(void **)(image_base+0x408d10u)=saved_world;
+    for(unsigned c=0;c<4;++c) modes[c][0xb]=saved_modes[c];
+    puts("PASS named ArrivalLeadLease forward/reverse/disconnect/rejoin/default-off (native seam spies)");
 }
 static void story_epoch_fixture(const SudekiMpControlUpdateDispatchWitness *w) {
     SudekiMpLanStoryNativeRoster r={.epoch=10,.revision=1,.available_mask=15,.leader_character=0,
@@ -355,12 +450,16 @@ static void story_epoch_fixture(const SudekiMpControlUpdateDispatchWitness *w) {
     image_base[0xec350u]^=1u; CHECK(!SudekiMpLanPartyControlStoryBegin(w,&r));
     image_base[0xec350u]=byte;
     CHECK(SudekiMpLanPartyControlStoryBegin(w,&r));
+    /* A3: both drain paths still recognize the old released key after rebind. */
+    CHECK(SudekiMpLanPartyControlStoryDrain(w,&r,&key,ready));
+    CHECK(SudekiMpLanPartyControlStoryLoadDrain(w,&key,ready));
     CHECK(SudekiMpLanPartyControlStoryNextLease(w,&connection,1,&next));
     CHECK(next.generation>key.generation);
     CHECK(SudekiMpLanPartyControlStoryAcquire(w,&r,&next,ready));
     CHECK(SudekiMpLanPartyControlStoryDrain(w,&r,&next,ready));
     CHECK(SudekiMpLanPartyControlStoryEnd());
     CHECK(!SudekiMpLanPartyControlHasLeases());
+    story_arrival_leases(w);
     story_fixture_roster=NULL;
     *(void **)actors[1]=old_actor_vt; *(void **)controller=old_controller_vt;
 }
@@ -371,6 +470,7 @@ static void callback(void *c, void *d,
     (void)c; (void)d;
     CHECK(SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w));
     escaped = *w;
+    if (phase == 9) { ++guard_posts;return; }
     if (phase == 8) { story_epoch_fixture(w); return; }
     if (phase == 7) { follow_fixture(w); return; }
     if (phase == 6) { rebind_fixture(w); return; }
@@ -986,6 +1086,15 @@ int SudekiMpLanPartyControlImageFixture(uint8_t *base) {
     phase=6; update(controller,NULL);
     phase=7; update(controller,NULL);
     phase=8; update(controller,NULL);
+    phase=9;guard_watch=TRUE;CHECK(SudekiMpControlSeparationStoryInputGuard(fixture_input_guard));
+    *(int *)(controller+0x80)=1;update(controller,NULL);
+    CHECK(guard_calls==1 && guard_original==1 && guard_posts==1);
+    guard_allow=FALSE;update(controller,NULL);
+    CHECK(guard_calls==2 && guard_original==1 && guard_posts==1);
+    CHECK(!SudekiMpUninstallControlSeparation() && GetLastError()==ERROR_BUSY);
+    CHECK(SudekiMpControlSeparationStoryInputGuard(NULL));guard_watch=FALSE;
+    *(int *)(controller+0x80)=1;
+    puts("PASS named ArrivalInputSeam pre-original ordering, refusal, callback lifetime");
     CHECK(SudekiMpControlSeparationUnregisterUpdateObserver(&observer_owner));
     CHECK(SudekiMpUninstallControlSeparation());
     memcpy(base+0x27cf0,original,sizeof(original));

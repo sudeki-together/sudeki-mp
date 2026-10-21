@@ -424,10 +424,11 @@ All three exits use `RET 0x10`; see [watch evidence](testing.md#native-contract-
   off.
 - Exact-image (`tests/story_enemy_targeting_image_test.c`): S1 prologue and
   caller bytes, the stdcall ABI, the return value and the `*out` contract with a
-  synthetic request, list and manager; mode-0xE passthrough without a list
-  read or direct filter call; S2 instruction bytes (ECX form) and the JG / +0xB
-  follow-ups, authored-cap continuation only for an exact HUMAN_REMOTE lease
-  or connected, fully released AWAY reservation; S3 consumer
+  synthetic request, list and manager; mode-0xE unchanged passthrough
+  (**CONFIRMED_TEST**). The no-list-read/no-direct-filter rule for mode 0xE
+  is **CONFIRMED_STATIC** by adapter code inspection. S2 instruction bytes
+  (ECX form) and the JG / +0xB follow-ups, authored-cap continuation only for an
+  exact HUMAN_REMOTE lease or connected, fully released AWAY reservation; S3 consumer
   registration refused before the thread is bound; transactional install,
   reverse rollback, refusal on a changed byte, refusal to install twice, busy
   and wrong-thread teardown, failed restoration retaining dependencies.
@@ -577,8 +578,9 @@ already accepted.
     at a time (2 ranged + 1 melee in total), rather than one per sniped
     enemy. While an alert on a shooter is active, other enemies hit by that
     shooter raise none and keep their own cooldown untouched; the next alert
-    can start only after the active one ends and that enemy's cooldown
-    passes. A unit still belongs to at most one alert or push at a time.
+    can start only after the active one ends and the cooldown of the enemy
+    that raises the next one has passed. A unit still belongs to at most one
+    alert or push at a time.
     Implementation enforces this independently for live and shadow state;
     an orphan responder copy keeps that shooter's alert active until it ends.
     These decisions were already accepted before this implementation pass.
