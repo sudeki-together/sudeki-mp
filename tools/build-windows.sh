@@ -30,7 +30,8 @@ fi
 
 cmake -S "${project_dir}" -B "${build_dir}" -G Ninja \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build "${build_dir}"
+# Report every independent compile failure; Ninja still exits nonzero on errors.
+cmake --build "${build_dir}" -- -k 0
 
 printf '\nSudekiMP Windows build complete:\n'
 printf '  %s\n' "${build_dir}/bin/SudekiMP.Launcher.exe"

@@ -108,8 +108,9 @@ int main(int argc, char **argv) {
     static const char *const names[] = {"ShopInventory", "WeaponCheck", "SetupShopSell",
         "StartShopping", "IsStoryBlockAfter|N"};
     for (unsigned n = 0; n < sizeof(names) / sizeof(names[0]); ++n) {
-        size_t body; uint32_t length;
+        size_t body = SIZE_MAX; uint32_t length = 0;
         locate(raw, size, names[n], &body, &length);
+        assert(body < size && length >= 2u && length <= size - body);
         const size_t offsets[] = {body, body + 1u, body + length - 1u};
         for (unsigned k = 0; k < 3; ++k) {
             raw[offsets[k]] ^= 0x01;

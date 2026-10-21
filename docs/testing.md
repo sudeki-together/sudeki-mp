@@ -2033,3 +2033,15 @@ are retained privately. Graphify AST update and diff checks pass. The runtime
 DLL remains `7d3596822dcf355694ef60a66660e6231ed46262b7a00732904183c24b9e7ae8`;
 the existing gameplay validation is unchanged. Native Windows retry and final
 main-build artifact validation are subsequent gates, recorded on the release.
+
+
+**Second native Windows compile blocker.** Run
+[212](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/actions/runs/212)
+on `88b2e3c` passes the movement compilation and reaches
+SolShopStockImageTest. MSYS2 reports its located function `body`/`length` may
+be uninitialized after the assertion-based lookup. The fixture initializes
+invalid sentinels and asserts the complete mutation span before indexing.
+The all-target cross-build, supported-GEX SolShopStockImageTest, pure
+SolShopStockTest and Windows build-script syntax checks pass. Runtime code
+is unchanged. Windows Ninja now uses `-k 0` to report all independent compile
+failures in one run; failures still produce a nonzero exit. Native retry follows.
